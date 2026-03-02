@@ -59,9 +59,9 @@ export TARGET_DIR
 
 # Base docker arguments
 DIR_HASH="$(echo -n "$TARGET_DIR" | md5sum | cut -c1-4)"
-PROJECT_NAME="vibe-$(basename "$TARGET_DIR")-$DIR_HASH"
+DIR_BASENAME="$(basename "$TARGET_DIR" | tr -cd "a-zA-Z0-9-" | tr " " "-" | tr "." "-" | tr "_" "-")"
+PROJECT_NAME="vibe-${DIR_BASENAME}-${DIR_HASH}"
 export PROJECT_NAME="${PROJECT_NAME,,}"
-
 DOCKER_COMPOSE="$(cat <<'EOF'
 services:
   vibe:

@@ -105,7 +105,7 @@ docker compose --project-name vibe-<project>-<hash> exec vibe bash
 - Variables: `VARIABLE_NAME` (uppercase with underscores)
 - Constants: Same as variables but readonly where appropriate
 - Function names: `function_name` (lowercase with underscores)
-- Project names: `vibe-<project>-<hash>`
+- Project names: `vibe-<sanitized-project>-<hash>` (dirname is sanitized: dots, spaces, underscores become hyphens)
 
 ### Error Handling
 
