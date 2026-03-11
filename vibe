@@ -285,7 +285,7 @@ if command -v code &>/dev/null; then
 fi
 
 # Check if the user has an on_build.sh script in ~/.vibe
-ON_BUILD_SCRIPT="${HOME}/.vibe/on_build.sh"
+ON_BUILD_SCRIPT="$HOME/.claude-docker/on_build.sh"
 if [[ -f "$ON_BUILD_SCRIPT" ]]; then
   export ON_BUILD="$(cat "$ON_BUILD_SCRIPT")"
 fi
