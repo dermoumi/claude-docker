@@ -85,6 +85,13 @@ services:
             ln -sf /tmp/gnupg_sock "$$GNUPG_SOCK"
           fi
 
+          # Import host GPG public keys once per container start
+          if [[ -n "$${GPG_PUBKEYS:-}" && ! -f /tmp/.gpg_keys_imported ]]; then
+            gpgconf --kill keyboxd 2>/dev/null
+            echo "$$GPG_PUBKEYS" | gpg --import 2>/dev/null ||:
+            touch /tmp/.gpg_keys_imported
+          fi
+
           if [[ -f /tmp/host_gitconfig ]]; then
             ln -sf /tmp/host_gitconfig "$$HOME/.gitconfig"
           fi
@@ -195,6 +202,8 @@ services:
 
         # Initial command to just keep the container running
         CMD ["bash", "-c", "sleep infinity"]
+    environment:
+      - GPG_PUBKEYS=${GPG_PUBKEYS:-}
     ports:
       - 0:4096
     volumes:
@@ -251,6 +260,8 @@ fi
 GNUPG_SOCK=$(gpgconf --list-dir agent-extra-socket)
 if [[ -S "$GNUPG_SOCK" ]]; then
   export GNUPG_SOCK
+  GPG_PUBKEYS=$(gpg --export -a 2>/dev/null)
+  export GPG_PUBKEYS
 fi
 
 # Setup gitconfig if it exists
@@ -327,6 +338,7 @@ open_vscode() {
 WATCHER_PID=""
 if ((HAS_CODE)); then
   (
+    echo "Launching code watcher socket"
     while true; do
       if read -r args < "$VSCODE_FIFO"; then
         container_id="$(get_container_id)"
