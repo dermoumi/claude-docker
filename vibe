@@ -7,38 +7,19 @@ DEBUG=0
 BUILD=0
 DOWN=0
 VSCODE=0
-WEB=0
-
-# Tool state directory
-STATE_DIR="${HOME}/.local/state/vibe"
-LAST_TOOL_FILE="${STATE_DIR}/last-tool"
-
-# Read last-used tool (default to opencode)
-TOOL=""
-if [[ -f "$LAST_TOOL_FILE" ]]; then
-  TOOL="$(cat "$LAST_TOOL_FILE")"
-fi
-TOOL="${TOOL:-opencode}"
 
 # Parse flags
-while getopts "BcdDlovw" opt; do
+while getopts "BdDlv" opt; do
   case $opt in
     B) BUILD=1;;
-    c) TOOL=claude;;
     d) DOWN=1;;
     D) DEBUG=1;;
     l) LOCAL=1;;
-    o) TOOL=opencode;;
     v) VSCODE=1;;
-    w) WEB=1;;
-    *) echo "Usage: vibe [-B] [-c] [-d] [-D] [-l] [-o] [-v] [-w] [directory] [-- args...]"; exit 1;;
+    *) echo "Usage: vibe [-B] [-d] [-D] [-l] [-v] [directory] [-- args...]"; exit 1;;
   esac
 done
 shift $((OPTIND - 1))
-
-# Persist tool choice
-mkdir -p "$STATE_DIR"
-echo "$TOOL" > "$LAST_TOOL_FILE"
 
 # Split positional args at -- separator
 EXTRA_ARGS=()
@@ -168,10 +149,7 @@ services:
         # Premake some directories to avoid permission issues
         RUN mkdir -p \
           /home/$$USER/.local/bin \
-          /home/$$USER/.local/share/opencode \
-          /home/$$USER/.local/state/opencode \
           /home/$$USER/.local/state/claude \
-          /home/$$USER/.config/opencode \
           /home/$$USER/.claude
 
         # Create a 'code' wrapper that signals the host to open VS Code
@@ -179,14 +157,11 @@ services:
         RUN echo "$$CODE_WRAPPER" > /home/$$USER/.local/bin/code
         RUN chmod +x /home/$$USER/.local/bin/code
 
-        # Install opencode
-        RUN curl -fsSL https://opencode.ai/install | bash
-
         # Install Claude Code
         RUN curl -fsSL https://claude.ai/install.sh | bash
 
         # Update the PATH
-        ENV PATH="/home/$$USER/.opencode/bin:/home/$$USER/.local/bin:$$PATH"
+        ENV PATH="/home/$$USER/.local/bin:$$PATH"
 
         # Install yay (AUR helper) as the non-root user
         RUN git clone https://aur.archlinux.org/yay.git \
@@ -205,8 +180,6 @@ services:
         CMD ["bash", "-c", "sleep infinity"]
     environment:
       - GPG_PUBKEYS=${GPG_PUBKEYS:-}
-    ports:
-      - 0:4096
     volumes:
       - ${TARGET_DIR}:/${PROJECT_NAME}/workspace
       - /var/run/docker.sock:/var/run/docker.sock
@@ -214,18 +187,12 @@ services:
       - ${GNUPG_SOCK:-/dev/null}:/tmp/gnupg_sock
       - ${GITCONFIG:-/dev/null}:/tmp/host_gitconfig
       - ${CLAUDE_JSON:-/dev/null}:/tmp/host_claude_json
-      - ${OPENCODE_SHARE:-opencode_share}:/home/dev/.local/share/opencode
-      - ${OPENCODE_STATE:-opencode_state}:/home/dev/.local/state/opencode
-      - ${OPENCODE_CONFIG:-opencode_config}:/home/dev/.config/opencode
       - ${CLAUDE_HOME:-claude_home}:/home/dev/.claude
       - ${CLAUDE_STATE:-claude_state}:/home/dev/.local/state/claude
       - ${VSCODE_FIFO:-/dev/null}:/tmp/vscode_fifo
       - ${VSCODE_FIFO_RESP:-/dev/null}:/tmp/vscode_fifo_resp
 
 volumes:
-  opencode_share:
-  opencode_state:
-  opencode_config:
   claude_home:
   claude_state:
 EOF
@@ -238,12 +205,6 @@ compose() {
 
 get_container_id() {
   docker ps --filter "name=${PROJECT_NAME}-vibe-1" -q
-}
-
-docker_exec() {
-  # Use different detach keys to avoid conflicts with opencode's CTRL+P
-  # Use -w to set CWD to the host path so tools key project data correctly
-  docker exec -it --detach-keys='ctrl-e,e' "$(get_container_id)" "$@"
 }
 
 # Tear down the compose file and exit if requested
@@ -293,25 +254,15 @@ fi
 
 # Setup host config directories (default) or use local Docker volumes (-l flag)
 if ! ((LOCAL)); then
-  if [[ "$TOOL" == "opencode" ]]; then
-    export OPENCODE_SHARE="${HOME}/.local/share/opencode"
-    export OPENCODE_STATE="${HOME}/.local/state/opencode"
-    export OPENCODE_CONFIG="${HOME}/.config/opencode"
+  export CLAUDE_STATE="${HOME}/.local/state/claude"
+  export CLAUDE_HOME="${HOME}/.claude"
 
-    mkdir -p "$OPENCODE_SHARE"
-    mkdir -p "$OPENCODE_STATE"
-    mkdir -p "$OPENCODE_CONFIG"
-  else
-    export CLAUDE_STATE="${HOME}/.local/state/claude"
-    export CLAUDE_HOME="${HOME}/.claude"
+  mkdir -p "$CLAUDE_STATE" "$CLAUDE_HOME"
 
-    mkdir -p "$CLAUDE_STATE" "$CLAUDE_HOME"
-
-    # Ensure the file exists with valid JSON so Docker can mount it as a file
-    export CLAUDE_JSON="${HOME}/.claude.json"
-    if [[ ! -f "$CLAUDE_JSON" ]]; then
-      echo '{}' > "$CLAUDE_JSON"
-    fi
+  # Ensure the file exists with valid JSON so Docker can mount it as a file
+  export CLAUDE_JSON="${HOME}/.claude.json"
+  if [[ ! -f "$CLAUDE_JSON" ]]; then
+    echo '{}' > "$CLAUDE_JSON"
   fi
 fi
 
@@ -400,51 +351,30 @@ fi
 
 # Shell into the container if in debug mode
 if ((DEBUG)); then
-  docker_exec /entrypoint.sh bash
+  compose exec vibe /entrypoint.sh bash
   exit 0
 fi
 
-# Web UI mode
-if ((WEB)); then
-  case "$TOOL" in
-    opencode)
-      PORT=$(docker port "$(get_container_id)" 4096 | head -1 | cut -d: -f2)
-      docker_exec /entrypoint.sh "$TOOL" web --port 4096 --hostname 0.0.0.0 "${EXTRA_ARGS[@]}" 2>&1 \
-        | sed -u "s|localhost:4096|localhost:$PORT|g"
-      ;;
-    claude)
-      docker_exec /entrypoint.sh "$TOOL" --dangerously-skip-permissions --remote "${EXTRA_ARGS[@]}"
-      ;;
-  esac
-  exit 0
-fi
-
-# Run the selected tool in the container
+# Run Claude Code in the container
 SYSTEM_PROMPT="You are in a disposable Docker container with passwordless sudo. Install anything you need freely."
 
-TOOL_FLAGS=()
-if [[ "$TOOL" == "claude" ]]; then
-  TOOL_FLAGS+=(--dangerously-skip-permissions)
-  TOOL_FLAGS+=(--append-system-prompt "$SYSTEM_PROMPT")
-fi
+TOOL_FLAGS=(--dangerously-skip-permissions --append-system-prompt "$SYSTEM_PROMPT")
 
-echo "Running '$TOOL' in container..."
+echo "Running 'claude' in container..."
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
-  docker_exec /entrypoint.sh "$TOOL" "${TOOL_FLAGS[@]}" "${EXTRA_ARGS[@]}"
-elif [[ "$TOOL" == "claude" ]]; then
+  compose exec vibe /entrypoint.sh claude "${TOOL_FLAGS[@]}" "${EXTRA_ARGS[@]}"
+else
   CLAUDE_PROJECT_DIR="/home/dev/.claude/projects/-${PROJECT_NAME}-workspace"
   : "$(
-    docker_exec bash -c 'ls -t '"${CLAUDE_PROJECT_DIR}"'/*.jsonl 2>/dev/null' \
+    compose exec vibe bash -c 'ls -t '"${CLAUDE_PROJECT_DIR}"'/*.jsonl 2>/dev/null' \
     | head -1 | xargs -r basename
   )"
   SESSION_ID="${_%.*}" # Strip .jsonl suffix
 
   if [[ -n "$SESSION_ID" ]]; then
     echo "Resuming session $SESSION_ID"
-    docker_exec /entrypoint.sh "$TOOL" --resume "$SESSION_ID" "${TOOL_FLAGS[@]}"
+    compose exec vibe /entrypoint.sh claude --resume "$SESSION_ID" "${TOOL_FLAGS[@]}"
   else
-    docker_exec /entrypoint.sh "$TOOL" "${TOOL_FLAGS[@]}"
+    compose exec vibe /entrypoint.sh claude "${TOOL_FLAGS[@]}"
   fi
-else
-  docker_exec /entrypoint.sh "$TOOL" "${TOOL_FLAGS[@]}" --continue
 fi
