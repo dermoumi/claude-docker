@@ -132,6 +132,17 @@ services:
             export EDITOR="code -w"
           fi
 
+          # Auto-trust the workspace directory so Claude doesn't prompt
+          node -e "
+            var fs = require('fs'), f = process.env.HOME + '/.claude.json';
+            var d = JSON.parse(fs.readFileSync(f, 'utf8'));
+            var p = d.projects = d.projects || {}, dir = process.cwd();
+            if (!p[dir] || !p[dir].hasTrustDialogAccepted) {
+              p[dir] = Object.assign(p[dir] || {}, {hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true});
+              fs.writeFileSync(f, JSON.stringify(d, null, 2));
+            }
+          " 2>/dev/null || true
+
           exec "$$@"
         CODE_WRAPPER: |
           #!/bin/bash
