@@ -42,7 +42,11 @@ elif [[ "${1:-}" == w:* ]]; then
   fi
 
   if [[ ! -d "$WORKTREE_DIR" ]]; then
-    git worktree add "$WORKTREE_DIR" "$WORKTREE_BRANCH"
+    if git show-ref --verify --quiet "refs/heads/$WORKTREE_BRANCH"; then
+      git worktree add "$WORKTREE_DIR" "$WORKTREE_BRANCH"
+    else
+      git worktree add -b "$WORKTREE_BRANCH" "$WORKTREE_DIR"
+    fi
   fi
 
   TARGET_DIR="$(realpath "$WORKTREE_DIR")"
