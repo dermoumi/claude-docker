@@ -73,7 +73,15 @@ export TARGET_DIR
 # Base docker arguments
 DIR_HASH="$(echo -n "$TARGET_DIR" | md5sum | cut -c1-4)"
 DIR_BASENAME="$(basename "$TARGET_DIR" | tr -cd "a-zA-Z0-9-" | tr " " "-" | tr "." "-" | tr "_" "-")"
-PROJECT_NAME="vibe-${DIR_BASENAME}-${DIR_HASH}"
+
+# Make sure to use the base repo's name when using worktrees
+if [[ -n "$WORKTREE" ]]; then
+  REPO_BASENAME="$(basename "$(git rev-parse --show-toplevel)" | tr -cd "a-zA-Z0-9-" | tr " " "-" | tr "." "-" | tr "_" "-")"
+  PROJECT_NAME="vibe-${REPO_BASENAME}-${DIR_BASENAME}-${DIR_HASH}"
+else
+  PROJECT_NAME="vibe-${DIR_BASENAME}-${DIR_HASH}"
+fi
+
 export PROJECT_NAME="${PROJECT_NAME,,}"
 DOCKER_COMPOSE="$(cat <<'EOF'
 services:
