@@ -22,12 +22,36 @@ done
 shift $((OPTIND - 1))
 
 # Split positional args at -- separator
+WORKTREE=""
+WORKTREE_BRANCH=""
 EXTRA_ARGS=()
 if [[ "${1:-}" == "--" ]]; then
   # No directory arg, rest goes to tool
   shift
   EXTRA_ARGS=("$@")
   TARGET_DIR="$PWD"
+elif [[ "${1:-}" == wt:* ]]; then
+  # Git worktree mode: create/reuse a worktree under .wt/
+  WORKTREE_BRANCH="${1#wt:}"
+  WORKTREE_BASE="$(git rev-parse --show-toplevel)/.wt"
+  WORKTREE_DIR="${WORKTREE_BASE}/${WORKTREE_BRANCH}"
+
+  mkdir -p "$WORKTREE_BASE"
+  if [[ ! -f "$WORKTREE_BASE/.gitignore" ]]; then
+    echo '*' > "$WORKTREE_BASE/.gitignore"
+  fi
+
+  if [[ ! -d "$WORKTREE_DIR" ]]; then
+    git worktree add "$WORKTREE_DIR" "$WORKTREE_BRANCH"
+  fi
+
+  TARGET_DIR="$(realpath "$WORKTREE_DIR")"
+  WORKTREE="$WORKTREE_DIR"
+  shift
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
+  EXTRA_ARGS=("$@")
 else
   TARGET_DIR="$(realpath -- "${1:-$PWD}")"
   shift || true
@@ -377,5 +401,14 @@ else
     compose exec claude /entrypoint.sh claude --resume "$SESSION_ID" "${TOOL_FLAGS[@]}"
   else
     compose exec claude /entrypoint.sh claude "${TOOL_FLAGS[@]}"
+  fi
+fi
+
+# Prompt to remove worktree if one was created
+if [[ -n "$WORKTREE" ]]; then
+  read -rp "Remove worktree '$WORKTREE_BRANCH'? [y/N] " answer
+  if [[ "$answer" == [yY] ]]; then
+    git worktree remove "$WORKTREE"
+    echo "Worktree '$WORKTREE_BRANCH' removed."
   fi
 fi
