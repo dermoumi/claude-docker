@@ -98,6 +98,14 @@ else
 fi
 
 export PROJECT_NAME="${PROJECT_NAME,,}"
+
+# Mount .vibe inside the worktree CWD so Claude can find it
+if [[ -n "${WORKTREE_REL:-}" ]]; then
+  export VIBE_MOUNT="/${PROJECT_NAME}/workspace/${WORKTREE_REL}/.vibe"
+else
+  export VIBE_MOUNT="/${PROJECT_NAME}/workspace/.vibe"
+fi
+
 DOCKER_COMPOSE="$(cat <<'EOF'
 services:
   claude:
@@ -257,7 +265,7 @@ services:
       - ${CLAUDE_STATE:-claude_state}:/home/dev/.local/state/claude
       - ${VSCODE_FIFO:-/dev/null}:/tmp/vscode_fifo
       - ${VSCODE_FIFO_RESP:-/dev/null}:/tmp/vscode_fifo_resp
-      - ${VIBE_DIR}:/${PROJECT_NAME}/workspace/.vibe
+      - ${VIBE_DIR}:${VIBE_MOUNT}
 
 volumes:
   claude_home:
@@ -446,8 +454,7 @@ Check .vibe/ for context files (PLAN.md, PROGRESS.md, etc.) and keep them update
 Be concise. Prefer simple, clean solutions over hacky or overengineered ones.
 When unsure, ask the user. If the implementation diverges significantly from the plan,
 stop and consult the user before proceeding.
-Break large plans into small steps — each step should fit in one reviewable commit.
-Complete one step at a time, then ask before moving to the next.
+Break large plans into small steps — each step should fit in one reviewable commit. NEVER make more than ~300 lines of changes without stopping to let the user review and commit. Complete one step at a time, then ask before moving to the next.
 "
 
 TOOL_FLAGS=(--dangerously-skip-permissions --append-system-prompt "$SYSTEM_PROMPT")
