@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
@@ -106,6 +106,8 @@ else
   export VIBE_MOUNT="/${PROJECT_NAME}/workspace/.vibe"
 fi
 
+export GID=$(id -g)
+
 DOCKER_COMPOSE="$(cat <<'EOF'
 services:
   claude:
@@ -190,18 +192,23 @@ services:
           fi
         ON_BUILD: "${ON_BUILD:-}"
       dockerfile_inline: |
-        FROM archlinux:latest
+        FROM debian:latest
 
         # Install minimal dependencies
-        RUN pacman -Syu --noconfirm \
-          base-devel git sudo docker openssh nodejs npm
+        RUN apt-get update -y \
+          && apt-get upgrade -y \
+          && apt-get install -y --no-install-recommends \
+            curl build-essential git sudo docker.io openssh-client nodejs npm \
+          && rm -rf /var/lib/apt/lists/*
+
 
         # Create a non-root user and make it sudoer without password
         ENV USER=dev
         ARG UID=1000
         ARG GID=1000
-        RUN groupadd -g $$GID $$USER \
-          && useradd -mG wheel -g $$USER -s /bin/bash -u $$UID $$USER \
+        RUN groupdel $(getent group $GID | cut -d: -f1) 2>/dev/null || true \
+          && groupadd -g $$GID $$USER \
+          && useradd -mG sudo -g $$USER -s /bin/bash -u $$UID $$USER \
           && echo "$$USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/$$USER
 
         # Switch to the non-root user
@@ -213,13 +220,6 @@ services:
           /home/$$USER/.local/bin \
           /home/$$USER/.local/state/claude \
           /home/$$USER/.claude
-
-        # Install yay (AUR helper) as the non-root user
-        RUN git clone https://aur.archlinux.org/yay.git \
-          && cd yay \
-          && makepkg -si --noconfirm \
-          && cd .. \
-          && rm -rf yay
 
         # Install Claude Code
         RUN curl -fsSL https://claude.ai/install.sh | bash
@@ -241,7 +241,7 @@ services:
         # Set the working directory
         ARG PROJECT_NAME
         RUN sudo mkdir -p /$$PROJECT_NAME/workspace \
-          && sudo chown $$USER:$$USER /$$PROJECT_NAME/workspace
+          && sudo chown $$UID:$$GID /$$PROJECT_NAME/workspace
         WORKDIR /$$PROJECT_NAME/workspace
 
         # Run the ON_BUILD script if provided (used to pre-install tools)
@@ -408,6 +408,11 @@ fi
 
 # Clean up watcher on exit
 cleanup() {
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux set-option -w automatic-rename on
+  else
+    printf '\033]0;\007'
+  fi
   if [[ -n "$WATCHER_PID" ]]; then
     kill "$WATCHER_PID" 2>/dev/null || true
   fi
@@ -445,7 +450,7 @@ fi
 
 # Run Claude Code in the container
 SYSTEM_PROMPT="
-Disposable Docker container with passwordless sudo — install anything freely.
+Disposable Docker ubuntu container with passwordless sudo — install anything freely.
 After installing a tool, append its directory to ~/.bin-paths.
 At session start, run: export PATH=\"\$(cat ~/.bin-paths 2>/dev/null | tr '\\n' ':'):\$PATH\"
 
@@ -458,6 +463,13 @@ Break large plans into small steps — each step should fit in one reviewable co
 "
 
 TOOL_FLAGS=(--dangerously-skip-permissions --append-system-prompt "$SYSTEM_PROMPT")
+
+# Set terminal/tmux window name
+if [[ -n "${TMUX:-}" ]]; then
+  tmux rename-window vibe
+else
+  printf '\033]0;vibe\007'
+fi
 
 echo "Running 'claude' in container..."
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
