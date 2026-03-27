@@ -198,7 +198,7 @@ services:
         RUN apt-get update -y \
           && apt-get upgrade -y \
           && apt-get install -y --no-install-recommends \
-            curl build-essential git sudo docker.io openssh-client nodejs npm \
+            curl build-essential git sudo docker.io openssh-client gnupg nodejs npm \
           && rm -rf /var/lib/apt/lists/*
 
 
