@@ -101,9 +101,9 @@ export PROJECT_NAME="${PROJECT_NAME,,}"
 
 # Mount .vibe inside the worktree CWD so Claude can find it
 if [[ -n "${WORKTREE_REL:-}" ]]; then
-  export VIBE_MOUNT="/${PROJECT_NAME}/workspace/${WORKTREE_REL}/.vibe"
+  export VIBE_MOUNT="${TARGET_DIR}/${WORKTREE_REL}/.vibe"
 else
-  export VIBE_MOUNT="/${PROJECT_NAME}/workspace/.vibe"
+  export VIBE_MOUNT="${TARGET_DIR}/.vibe"
 fi
 
 export GID=$(id -g)
@@ -116,7 +116,7 @@ services:
       args:
         UID: ${UID:-1000}
         GID: ${GID:-1000}
-        PROJECT_NAME: ${PROJECT_NAME}
+        TARGET_DIR: ${TARGET_DIR}
         ENTRYPOINT: |
           #!/bin/bash
 
@@ -239,10 +239,10 @@ services:
         ENTRYPOINT ["/entrypoint.sh"]
 
         # Set the working directory
-        ARG PROJECT_NAME
-        RUN sudo mkdir -p /$$PROJECT_NAME/workspace \
-          && sudo chown $$UID:$$GID /$$PROJECT_NAME/workspace
-        WORKDIR /$$PROJECT_NAME/workspace
+        ARG TARGET_DIR
+        RUN sudo mkdir -p "$$TARGET_DIR" \
+          && sudo chown $$UID:$$GID "$$TARGET_DIR"
+        WORKDIR $$TARGET_DIR
 
         # Run the ON_BUILD script if provided (used to pre-install tools)
         ARG ON_BUILD
@@ -255,7 +255,7 @@ services:
     environment:
       - GPG_PUBKEYS=${GPG_PUBKEYS:-}
     volumes:
-      - ${TARGET_DIR}:/${PROJECT_NAME}/workspace
+      - ${TARGET_DIR}:${TARGET_DIR}
       - /var/run/docker.sock:/var/run/docker.sock
       - ${SSH_AUTH_SOCK:-/dev/null}:/tmp/ssh_auth_sock
       - ${GNUPG_SOCK:-/dev/null}:/tmp/gnupg_sock
@@ -350,7 +350,7 @@ compose --file - up "${UP_ARGS[@]}" -d <<< "$DOCKER_COMPOSE"
 open_vscode() {
   local container_id path hex_id
   container_id="$(get_container_id)"
-  path="${1:-/$PROJECT_NAME/workspace}"
+  path="${1:-$TARGET_DIR}"
   hex_id="$(printf '%s' "$container_id" | od -A n -t x1 | tr -d ' \n')"
   code --folder-uri "vscode-remote://attached-container+${hex_id}${path}"
 }
@@ -392,7 +392,7 @@ if ((HAS_CODE)); then
 
         # Always attach to /workspace unless a directory was explicitly given
         if [[ "$has_folder" -eq 0 ]]; then
-          code_args+=("--folder-uri" "${uri_base}/$PROJECT_NAME/workspace")
+          code_args+=("--folder-uri" "${uri_base}${TARGET_DIR}")
         fi
 
         code "${code_args[@]}"
@@ -431,14 +431,14 @@ if ((VSCODE)); then
     echo "Error: 'code' command not found on host" >&2
     exit 1
   fi
-  open_vscode "/$PROJECT_NAME/workspace"
+  open_vscode "$TARGET_DIR"
 fi
 
 # Helper for compose exec with explicit working directory
 if [[ -n "${WORKTREE_REL:-}" ]]; then
-  WORKDIR="/${PROJECT_NAME}/workspace/${WORKTREE_REL}"
+  WORKDIR="${TARGET_DIR}/${WORKTREE_REL}"
 else
-  WORKDIR="/${PROJECT_NAME}/workspace"
+  WORKDIR="${TARGET_DIR}"
 fi
 EXEC=(compose exec -w "$WORKDIR" claude)
 
@@ -475,7 +475,7 @@ echo "Running 'claude' in container..."
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
   "${EXEC[@]}" /entrypoint.sh claude "${TOOL_FLAGS[@]}" "${EXTRA_ARGS[@]}"
 else
-  CLAUDE_PROJECT_DIR="/home/dev/.claude/projects/-${PROJECT_NAME}-workspace"
+  CLAUDE_PROJECT_DIR="/home/dev/.claude/projects/$(echo "$WORKDIR" | tr '/' '-')"
   : "$(
     compose exec -T -w "$WORKDIR" claude \
     bash -c 'ls -t '"${CLAUDE_PROJECT_DIR}"'/*.jsonl 2>/dev/null' \
