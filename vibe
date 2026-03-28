@@ -116,7 +116,8 @@ else
   export VIBE_MOUNT="${TARGET_DIR}/.vibe"
 fi
 
-export GID=$(id -g)
+GID=$(id -g)
+export GID
 
 DOCKER_COMPOSE="$(cat <<'EOF'
 services:
