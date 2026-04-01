@@ -9,6 +9,7 @@ DOWN=0
 KEEP=0
 TORN_DOWN=0
 VSCODE=0
+LOCAL_VOLUMES=0
 
 # Parse flags
 while getopts "BdDklv" opt; do
@@ -17,7 +18,7 @@ while getopts "BdDklv" opt; do
     d) DOWN=1;;
     D) DEBUG=1;;
     k) KEEP=1;;
-    l) LOCAL=1;;
+    l) LOCAL_VOLUMES=1;;
     v) VSCODE=1;;
     *) echo "Usage: vibe [-B] [-d] [-D] [-k] [-l] [-v] [directory] [-- args...]"; exit 1;;
   esac
@@ -371,7 +372,7 @@ if [[ -f "$ON_BUILD_SCRIPT" ]]; then
 fi
 
 # Setup host config directories (default) or use local Docker volumes (-l flag)
-if ! ((LOCAL)); then
+if ! ((LOCAL_VOLUMES)); then
   export CLAUDE_STATE="${HOME}/.local/state/claude"
   export CLAUDE_HOME="${HOME}/.claude"
 
