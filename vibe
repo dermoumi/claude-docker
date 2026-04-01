@@ -509,7 +509,7 @@ cleanup() {
     kill "$BROWSER_WATCHER_PID" 2>/dev/null || true
   fi
   if ! ((KEEP)) && ! ((TORN_DOWN)); then
-    compose down &>/dev/null
+    compose down
     rm -f "$VSCODE_FIFO" "$VSCODE_FIFO_RESP" "$BROWSER_FIFO"
   fi
 }
@@ -576,7 +576,7 @@ fi
 
 # Tear down container before worktree removal so the mount is released
 if [[ -n "$WORKTREE" ]] && ! ((KEEP)); then
-  compose down &>/dev/null
+  compose down
   rm -f "$VSCODE_FIFO" "$VSCODE_FIFO_RESP" "$BROWSER_FIFO"
   TORN_DOWN=1
 fi
