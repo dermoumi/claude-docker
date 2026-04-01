@@ -329,12 +329,14 @@ if ((DOWN)); then
 fi
 
 # Setup the GPG extra socket.
-# The extra socket is more restricted then the normal socket
-GNUPG_SOCK=$(gpgconf --list-dir agent-extra-socket)
-if [[ -S "$GNUPG_SOCK" ]]; then
-  export GNUPG_SOCK
-  GPG_PUBKEYS=$(gpg --export -a 2>/dev/null)
-  export GPG_PUBKEYS
+# The extra socket is more restricted than the normal socket
+if command -v gpgconf &>/dev/null; then
+  GNUPG_SOCK=$(gpgconf --list-dir agent-extra-socket)
+  if [[ -S "$GNUPG_SOCK" ]]; then
+    export GNUPG_SOCK
+    GPG_PUBKEYS=$(gpg --export -a 2>/dev/null)
+    export GPG_PUBKEYS
+  fi
 fi
 
 # Setup gitconfig if it exists
