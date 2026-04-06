@@ -254,6 +254,7 @@ services:
 
         # Create a non-root user and make it sudoer without password
         ENV USER=dev
+        ENV GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
         ARG UID=1000
         ARG GID=1000
         RUN groupdel $(getent group $GID | cut -d: -f1) 2>/dev/null || true \
