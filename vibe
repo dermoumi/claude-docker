@@ -549,30 +549,18 @@ Check .vibe/ for context files (PLAN.md, PROGRESS.md, etc.) and keep them update
 Be concise. Skip reaffirmations — go straight to the point.
 Challenge the user's decisions if you see a better approach.
 Prefer simple, clean solutions over hacky or overengineered ones.
-In plan mode, ONLY plan. Never edit files until the plan is approved.
+In plan mode, ONLY plan. Do not edit, write, or create any files until the plan is explicitly approved.
 Break large plans into small steps — each step should fit in one reviewable commit. NEVER make more than ~300 lines of changes without stopping to let the user review and commit. Complete one step at a time, then ask before moving to the next.
 "
 
-TOOL_FLAGS=(--dangerously-skip-permissions --append-system-prompt "$SYSTEM_PROMPT")
+TOOL_FLAGS=(--dangerously-skip-permissions --permission-mode plan --append-system-prompt "$SYSTEM_PROMPT")
 
 echo "Running 'claude' in container..."
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
   "${EXEC[@]}" /entrypoint.sh claude "${TOOL_FLAGS[@]}" "${EXTRA_ARGS[@]}"
 else
-  CLAUDE_PROJECT_DIR="/home/dev/.claude/projects/$(echo "$WORKDIR" | tr '/' '-')"
-  SESSION_FILE="$(
-    compose exec -T -w "$WORKDIR" claude \
-    bash -c 'ls -t '"${CLAUDE_PROJECT_DIR}"'/*.jsonl 2>/dev/null' \
-    | head -1 | xargs -r basename
-  )"
-  SESSION_ID="${SESSION_FILE%.*}"
-
-  if [[ -n "$SESSION_ID" ]]; then
-    echo "Resuming session $SESSION_ID"
-    "${EXEC[@]}" /entrypoint.sh claude --resume "$SESSION_ID" "${TOOL_FLAGS[@]}"
-  else
-    "${EXEC[@]}" /entrypoint.sh claude "${TOOL_FLAGS[@]}"
-  fi
+  "${EXEC[@]}" /entrypoint.sh claude --continue "${TOOL_FLAGS[@]}" \
+    || "${EXEC[@]}" /entrypoint.sh claude "${TOOL_FLAGS[@]}"
 fi
 
 # Tear down container before worktree removal so the mount is released
