@@ -311,7 +311,8 @@ services:
     environment:
       - GPG_PUBKEYS=${GPG_PUBKEYS:-}
     volumes:
-      - ${TARGET_DIR}:${TARGET_DIR}
+      - ${TARGET_DIR}:${TARGET_DIR}${VOLUME_RO:-}
+      # __WT_VOLUMES__
       - /var/run/docker.sock:/var/run/docker.sock
       - ${SSH_AUTH_SOCK:-/dev/null}:/tmp/ssh_auth_sock
       - ${GNUPG_SOCK:-/dev/null}:/tmp/gnupg_sock
@@ -329,6 +330,14 @@ volumes:
   claude_state:
 EOF
 )"
+
+# In worktree mode, mount parent repo as read-only with .git and worktree dir as read-write
+if [[ -n "$WORKTREE" ]]; then
+  export VOLUME_RO=":ro"
+  WT_VOLUMES="      - \${TARGET_DIR}/.git:\${TARGET_DIR}/.git
+      - \${TARGET_DIR}/${WORKTREE_REL}:\${TARGET_DIR}/${WORKTREE_REL}"
+  DOCKER_COMPOSE="${DOCKER_COMPOSE/      # __WT_VOLUMES__/$WT_VOLUMES}"
+fi
 
 # Utility function to run docker compose with the correct arguments
 compose() {
@@ -547,18 +556,25 @@ fi
 
 # Run Claude Code in the container
 SYSTEM_PROMPT="
-Disposable Docker ubuntu container with passwordless sudo — install anything freely.
+You are running inside a disposable Ubuntu Docker container with passwordless sudo. Install anything you need freely.
 After installing a tool, append its directory to ~/.bin-paths.
 At session start, run: export PATH=\"\$(cat ~/.bin-paths 2>/dev/null | tr '\\n' ':'):\$PATH\"
 
 Check .vibe/ for context files (PLAN.md, PROGRESS.md, etc.) and keep them updated. Max 150 lines each.
 
-Be concise. Skip reaffirmations — go straight to the point.
 Challenge the user's decisions if you see a better approach.
 Prefer simple, clean solutions over hacky or overengineered ones.
-In plan mode, ONLY plan. Do not edit, write, or create any files until the plan is explicitly approved.
+If unexpected factors force you to deviate from the agreed plan, stop and discuss it with the user before proceeding.
 Break large plans into small steps — each step should fit in one reviewable commit. NEVER make more than ~300 lines of changes without stopping to let the user review and commit. Complete one step at a time, then ask before moving to the next.
 "
+
+if [[ -n "$WORKTREE" ]]; then
+  SYSTEM_PROMPT+="
+You are working inside a git worktree for branch '$WORKTREE_BRANCH' at $WORKDIR.
+The parent repository is mounted read-only — only this worktree directory and .git/ are writable.
+You may read parent files (e.g. to compare against main), but do not attempt to modify them.
+"
+fi
 
 TOOL_FLAGS=(--dangerously-skip-permissions --permission-mode plan --append-system-prompt "$SYSTEM_PROMPT")
 
