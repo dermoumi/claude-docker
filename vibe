@@ -42,9 +42,6 @@ elif [[ "${1:-}" == w:* ]]; then
   WORKTREE_BASE="$(git rev-parse --show-toplevel)/.w"
 
   mkdir -p "$WORKTREE_BASE"
-  if [[ ! -f "$WORKTREE_BASE/.gitignore" ]]; then
-    echo '*' > "$WORKTREE_BASE/.gitignore"
-  fi
 
   WORKTREE="${WORKTREE_BASE}/${WORKTREE_BRANCH}"
   if [[ -d "$WORKTREE" ]] && [[ ! -f "$WORKTREE/.git" ]]; then
