@@ -83,11 +83,11 @@ if [[ ! -d "$TARGET_DIR" ]]; then
 fi
 export TARGET_DIR
 
-# Ensure .vibe/ exists and mount it
+# Ensure .claude/ exists and mount it
 if [[ -n "$WORKTREE" ]]; then
-  VIBE_DIR="$(git rev-parse --show-toplevel)/.vibe"
+  VIBE_DIR="$(git rev-parse --show-toplevel)/.claude"
 else
-  VIBE_DIR="${TARGET_DIR}/.vibe"
+  VIBE_DIR="${TARGET_DIR}/.claude"
 fi
 mkdir -p "$VIBE_DIR"
 if [[ ! -f "$VIBE_DIR/.gitignore" ]]; then
@@ -125,11 +125,11 @@ fi
 
 export PROJECT_NAME="${PROJECT_NAME,,}"
 
-# Mount .vibe inside the worktree CWD so Claude can find it
+# Mount .claude inside the worktree CWD so Claude can find it
 if [[ -n "${WORKTREE_REL:-}" ]]; then
-  export VIBE_MOUNT="${TARGET_DIR}/${WORKTREE_REL}/.vibe"
+  export VIBE_MOUNT="${TARGET_DIR}/${WORKTREE_REL}/.claude"
 else
-  export VIBE_MOUNT="${TARGET_DIR}/.vibe"
+  export VIBE_MOUNT="${TARGET_DIR}/.claude"
 fi
 
 GID=$(id -g)
@@ -560,7 +560,7 @@ You are running inside a disposable Ubuntu Docker container with passwordless su
 After installing a tool, append its directory to ~/.bin-paths.
 At session start, run: export PATH=\"\$(cat ~/.bin-paths 2>/dev/null | tr '\\n' ':'):\$PATH\"
 
-Save project-related context and memory in .vibe/ — context files (PLAN.md, PROGRESS.md, etc.) at the .vibe/ root, and auto-memory files (MEMORY.md and per-memory files) under .vibe/memory/. .vibe/ is bind-mounted from the parent repo and persists across all git worktrees of this project. Max 150 lines per file.
+Save project-related context and memory in .claude/ — context files (PLAN.md, PROGRESS.md, etc.) at the .claude/ root, and auto-memory files (MEMORY.md and per-memory files) under .claude/memory/. .claude/ is bind-mounted from the parent repo and persists across all git worktrees of this project. Max 150 lines per file.
 
 Challenge the user's decisions if you see a better approach.
 Prefer simple, clean solutions over hacky or overengineered ones.
