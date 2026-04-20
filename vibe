@@ -592,6 +592,8 @@ else
     || "${EXEC[@]}" /entrypoint.sh claude "${TOOL_FLAGS[@]}"
 fi
 
+clear
+
 # Tear down container before worktree removal so the mount is released
 if [[ -n "$WORKTREE" ]] && ! ((KEEP)); then
   compose down
