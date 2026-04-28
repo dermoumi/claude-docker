@@ -125,12 +125,6 @@ fi
 
 export PROJECT_NAME="${PROJECT_NAME,,}"
 
-if [[ -n "$WORKTREE" ]]; then
-  SESSION_NAME="${DIR_BASENAME} (${WORKTREE_BRANCH})"
-else
-  SESSION_NAME="${DIR_BASENAME}"
-fi
-
 # Mount .claude inside the worktree CWD so Claude can find it
 if [[ -n "${WORKTREE_REL:-}" ]]; then
   export VIBE_MOUNT="${TARGET_DIR}/${WORKTREE_REL}/.claude"
@@ -582,7 +576,7 @@ You may read parent files (e.g. to compare against main), but do not attempt to 
 "
 fi
 
-TOOL_FLAGS=(--name "$SESSION_NAME" --dangerously-skip-permissions --permission-mode plan --append-system-prompt "$SYSTEM_PROMPT")
+TOOL_FLAGS=(--dangerously-skip-permissions --permission-mode plan --append-system-prompt "$SYSTEM_PROMPT")
 
 echo "Running 'claude' in container..."
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
