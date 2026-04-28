@@ -171,6 +171,7 @@ services:
             gpg --batch --no-autostart --list-keys --with-colons 2>/dev/null \
               | awk -F: '/^fpr:/{print $$10":6:"}' \
               | gpg --batch --no-autostart --import-ownertrust 2>/dev/null || true
+            gpgconf --kill keyboxd 2>/dev/null || true
             touch /tmp/.gpg_keys_imported
           fi
 
