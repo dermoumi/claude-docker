@@ -337,6 +337,8 @@ if [[ -n "$WORKTREE" ]]; then
   DOCKER_COMPOSE="${DOCKER_COMPOSE/      # __WT_VOLUMES__/$WT_VOLUMES}"
 fi
 
+export DOCKER_CONTEXT=default
+
 # Utility function to run docker compose with the correct arguments
 compose() {
   GID=$(id -g) docker compose --project-name "$PROJECT_NAME" "$@"
@@ -363,7 +365,7 @@ if command -v gpgconf &>/dev/null; then
   GNUPG_SOCK=$(gpgconf --list-dir agent-extra-socket)
   if [[ -S "$GNUPG_SOCK" ]]; then
     export GNUPG_SOCK
-    GPG_PUBKEYS=$(gpg --export -a 2>/dev/null)
+    GPG_PUBKEYS=$(gpg --export -a $(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $5}'))
     export GPG_PUBKEYS
   fi
 fi
