@@ -95,10 +95,18 @@ if [[ ! -f "$VIBE_DIR/.gitignore" ]]; then
 fi
 export VIBE_DIR
 
+# Sanitize a string to only contain alphanumeric characters and hyphens
+sanitize() { echo "$1" | tr -cd "a-zA-Z0-9-"; }
+
+# Base docker arguments
+DIR_HASH="$(echo -n "$TARGET_DIR" | md5sum | cut -c1-4)"
+DIR_BASENAME="$(sanitize "$(basename "$TARGET_DIR")")"
+
 # Set terminal/tmux window name early (before slow compose up)
-WINDOW_TITLE="vibe"
 if [[ -n "$WORKTREE_BRANCH" ]]; then
-  WINDOW_TITLE="vibe:${WORKTREE_BRANCH}"
+  WINDOW_TITLE="w:${DIR_BASENAME}:${WORKTREE_BRANCH}"
+else
+  WINDOW_TITLE="v:${DIR_BASENAME}"
 fi
 TMUX_WINDOW=""
 if [[ -n "${TMUX:-}" ]]; then
@@ -107,13 +115,6 @@ if [[ -n "${TMUX:-}" ]]; then
 else
   printf '\033]0;%s\007' "$WINDOW_TITLE"
 fi
-
-# Sanitize a string to only contain alphanumeric characters and hyphens
-sanitize() { echo "$1" | tr -cd "a-zA-Z0-9-"; }
-
-# Base docker arguments
-DIR_HASH="$(echo -n "$TARGET_DIR" | md5sum | cut -c1-4)"
-DIR_BASENAME="$(sanitize "$(basename "$TARGET_DIR")")"
 
 # For worktrees, include the branch name (DIR_BASENAME is already the repo name)
 if [[ -n "$WORKTREE" ]]; then
