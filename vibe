@@ -95,6 +95,18 @@ if [[ ! -f "$VIBE_DIR/.gitignore" ]]; then
 fi
 export VIBE_DIR
 
+# Ensure graphify-out/ exists and mount it
+if [[ -n "$WORKTREE" ]]; then
+  GRAPHIFY_DIR="$(git rev-parse --show-toplevel)/graphify-out"
+else
+  GRAPHIFY_DIR="${TARGET_DIR}/graphify-out"
+fi
+mkdir -p "$GRAPHIFY_DIR"
+if [[ ! -f "$GRAPHIFY_DIR/.gitignore" ]]; then
+  echo '*' > "$GRAPHIFY_DIR/.gitignore"
+fi
+export GRAPHIFY_DIR
+
 # Sanitize a string to only contain alphanumeric characters and hyphens
 sanitize() { echo "$1" | tr -cd "a-zA-Z0-9-"; }
 
@@ -131,6 +143,13 @@ if [[ -n "${WORKTREE_REL:-}" ]]; then
   export VIBE_MOUNT="${TARGET_DIR}/${WORKTREE_REL}/.claude"
 else
   export VIBE_MOUNT="${TARGET_DIR}/.claude"
+fi
+
+# Mount graphify-out inside the worktree CWD
+if [[ -n "${WORKTREE_REL:-}" ]]; then
+  export GRAPHIFY_MOUNT="${TARGET_DIR}/${WORKTREE_REL}/graphify-out"
+else
+  export GRAPHIFY_MOUNT="${TARGET_DIR}/graphify-out"
 fi
 
 GID=$(id -g)
@@ -210,6 +229,11 @@ services:
             }
           " 2>/dev/null || true
 
+          if [[ ! -f /tmp/.graphify_installed ]]; then
+            graphify install &>/dev/null || true
+            touch /tmp/.graphify_installed
+          fi
+
           exec "$$@"
         CODE_WRAPPER: |
           #!/bin/bash
@@ -247,7 +271,7 @@ services:
         RUN apt-get update -y \
           && apt-get upgrade -y \
           && apt-get install -y --no-install-recommends \
-            curl build-essential git sudo docker.io openssh-client gnupg nodejs npm \
+            curl build-essential git sudo docker.io openssh-client gnupg nodejs npm python3 python3-dev \
           && rm -rf /var/lib/apt/lists/*
 
 
@@ -271,9 +295,11 @@ services:
           /home/$$USER/.local/state/claude \
           /home/$$USER/.claude
 
-        # Install Claude Code
-        RUN curl -fsSL https://claude.ai/install.sh | bash
+        # Install Claude Code, uv, and graphify
+        RUN curl -fsSL https://claude.ai/install.sh | bash \
+          && curl -LsSf https://astral.sh/uv/install.sh | sh
         ENV PATH="/home/$$USER/.local/bin:$$PATH"
+        RUN uv tool install graphifyy
 
         # --- Project-specific layers (cheap, change per project) ---
 
@@ -323,6 +349,7 @@ services:
       - ${VSCODE_FIFO_RESP:-/dev/null}:/tmp/vscode_fifo_resp
       - ${BROWSER_FIFO:-/dev/null}:/tmp/browser_fifo
       - ${VIBE_DIR}:${VIBE_MOUNT}
+      - ${GRAPHIFY_DIR}:${GRAPHIFY_MOUNT}
 
 volumes:
   claude_home:
