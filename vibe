@@ -270,6 +270,28 @@ services:
               echo "$$arg" > /tmp/browser_fifo
             done
           fi
+        CLIPBOARD_WRAPPER: |
+          #!/bin/bash
+          [[ -p /tmp/clipboard_fifo ]] || exit 1
+          TYPE="image/png"
+          IS_READ=0
+          LIST=0
+          case "$$(basename "$$0")" in wl-paste) IS_READ=1 ;; esac
+          while [[ $$# -gt 0 ]]; do
+            case "$$1" in
+              -o|--output) IS_READ=1; shift ;;
+              -l|--list-types) LIST=1; IS_READ=1; shift ;;
+              -t|--type) TYPE="$$2"; shift 2 ;;
+              *) shift ;;
+            esac
+          done
+          ((IS_READ)) || exit 0
+          if ((LIST)) || [[ "$$TYPE" == "TARGETS" ]]; then
+            echo "LIST" > /tmp/clipboard_fifo
+          else
+            echo "$$TYPE" > /tmp/clipboard_fifo
+          fi
+          cat /tmp/clipboard_fifo_resp
         ON_BUILD: "${ON_BUILD:-}"
       dockerfile_inline: |
         FROM debian:latest
@@ -320,6 +342,13 @@ services:
         RUN echo "$$BROWSER_WRAPPER" > /home/$$USER/.local/bin/xdg-open \
           && chmod +x /home/$$USER/.local/bin/xdg-open
 
+        # Create clipboard wrappers that proxy reads to the host
+        ARG CLIPBOARD_WRAPPER
+        RUN echo "$$CLIPBOARD_WRAPPER" > /home/$$USER/.local/bin/xclip \
+          && chmod +x /home/$$USER/.local/bin/xclip \
+          && ln -s xclip /home/$$USER/.local/bin/xsel \
+          && ln -s xclip /home/$$USER/.local/bin/wl-paste
+
         # Create entrypoint script
         ARG ENTRYPOINT
         RUN echo "$$ENTRYPOINT" | sudo tee /entrypoint.sh > /dev/null \
@@ -355,6 +384,8 @@ services:
       - ${VSCODE_FIFO:-/dev/null}:/tmp/vscode_fifo
       - ${VSCODE_FIFO_RESP:-/dev/null}:/tmp/vscode_fifo_resp
       - ${BROWSER_FIFO:-/dev/null}:/tmp/browser_fifo
+      - ${CLIPBOARD_FIFO:-/dev/null}:/tmp/clipboard_fifo
+      - ${CLIPBOARD_FIFO_RESP:-/dev/null}:/tmp/clipboard_fifo_resp
       - ${VIBE_DIR}:${VIBE_MOUNT}
       - ${GRAPHIFY_DIR}:${GRAPHIFY_MOUNT}
 
@@ -390,7 +421,7 @@ FIFO_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 if ((DOWN)); then
   compose down
   # Clean up any FIFOs for this project
-  rm -f "${FIFO_DIR}"/vibe-vscode-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-browser-"${PROJECT_NAME}"-*.fifo
+  rm -f "${FIFO_DIR}"/vibe-vscode-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-browser-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-clipboard-"${PROJECT_NAME}"-*.fifo
   exit 0
 fi
 
@@ -444,6 +475,28 @@ else
   BROWSER_FIFO=""
 fi
 export BROWSER_FIFO
+
+# Setup clipboard FIFOs for proxying clipboard reads from the container
+if command -v wl-paste &>/dev/null; then
+  CLIP_CMD="wl-paste"
+elif command -v xclip &>/dev/null; then
+  CLIP_CMD="xclip"
+else
+  CLIP_CMD=""
+fi
+
+if [[ -n "$CLIP_CMD" ]]; then
+  CLIPBOARD_FIFO="${FIFO_DIR}/vibe-clipboard-${PROJECT_NAME}-${FIFO_ID}.fifo"
+  CLIPBOARD_FIFO_RESP="${FIFO_DIR}/vibe-clipboard-${PROJECT_NAME}-${FIFO_ID}-resp.fifo"
+  for fifo in "$CLIPBOARD_FIFO" "$CLIPBOARD_FIFO_RESP"; do
+    mkfifo "$fifo"
+    chmod 600 "$fifo"
+  done
+else
+  CLIPBOARD_FIFO=""
+  CLIPBOARD_FIFO_RESP=""
+fi
+export CLIPBOARD_FIFO CLIPBOARD_FIFO_RESP
 
 # Check if the user has an on_build.sh script in ~/.vibe
 ON_BUILD_SCRIPT="$HOME/.claude-docker/on_build.sh"
@@ -549,6 +602,31 @@ if [[ -n "$OPEN_CMD" ]]; then
   BROWSER_WATCHER_PID=$!
 fi
 
+# Start clipboard watcher for proxying clipboard reads to the host
+CLIPBOARD_WATCHER_PID=""
+if [[ -n "$CLIP_CMD" ]]; then
+  (
+    while [[ -p "$CLIPBOARD_FIFO" ]]; do
+      if req=$(cat "$CLIPBOARD_FIFO" 2>/dev/null) && [[ -n "$req" ]]; then
+        if [[ "$req" == "LIST" ]]; then
+          if [[ "$CLIP_CMD" == "wl-paste" ]]; then
+            wl-paste -l 2>/dev/null > "$CLIPBOARD_FIFO_RESP" || echo -n > "$CLIPBOARD_FIFO_RESP"
+          else
+            xclip -selection clipboard -t TARGETS -o 2>/dev/null > "$CLIPBOARD_FIFO_RESP" || echo -n > "$CLIPBOARD_FIFO_RESP"
+          fi
+        else
+          if [[ "$CLIP_CMD" == "wl-paste" ]]; then
+            wl-paste --type "$req" 2>/dev/null > "$CLIPBOARD_FIFO_RESP" || echo -n > "$CLIPBOARD_FIFO_RESP"
+          else
+            xclip -selection clipboard -t "$req" -o 2>/dev/null > "$CLIPBOARD_FIFO_RESP" || echo -n > "$CLIPBOARD_FIFO_RESP"
+          fi
+        fi
+      fi
+    done
+  ) &
+  CLIPBOARD_WATCHER_PID=$!
+fi
+
 # Clean up watcher on exit
 cleanup() {
   if [[ -n "$TMUX_WINDOW" ]]; then
@@ -562,9 +640,12 @@ cleanup() {
   if [[ -n "$BROWSER_WATCHER_PID" ]]; then
     kill "$BROWSER_WATCHER_PID" 2>/dev/null || true
   fi
+  if [[ -n "$CLIPBOARD_WATCHER_PID" ]]; then
+    kill "$CLIPBOARD_WATCHER_PID" 2>/dev/null || true
+  fi
   if ! ((KEEP)) && ! ((TORN_DOWN)); then
     compose down
-    rm -f "$VSCODE_FIFO" "$VSCODE_FIFO_RESP" "$BROWSER_FIFO"
+    rm -f "$VSCODE_FIFO" "$VSCODE_FIFO_RESP" "$BROWSER_FIFO" "$CLIPBOARD_FIFO" "$CLIPBOARD_FIFO_RESP"
   fi
 }
 trap cleanup EXIT
