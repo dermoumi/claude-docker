@@ -69,9 +69,16 @@ elif [[ "${1:-}" == w:* ]]; then
     shift
   fi
   EXTRA_ARGS=("$@")
+elif [[ -z "${1:-}" ]] || [[ "${1:-}" == -* ]]; then
+  # No directory arg; anything remaining is tool args
+  TARGET_DIR="$PWD"
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
+  EXTRA_ARGS=("$@")
 else
-  TARGET_DIR="$(realpath -- "${1:-$PWD}")"
-  shift || true
+  TARGET_DIR="$(realpath -- "$1")"
+  shift
   if [[ "${1:-}" == "--" ]]; then
     shift
   fi
