@@ -11,18 +11,22 @@ TORN_DOWN=0
 VSCODE=0
 NO_CACHE=0
 LOCAL_VOLUMES=0
+GITIGNORE_ON=0
+GITIGNORE_OFF=0
 
 # Parse flags
-while getopts "BdDklNv" opt; do
+while getopts "BdDgGklNv" opt; do
   case $opt in
     B) BUILD=1;;
     d) DOWN=1;;
     D) DEBUG=1;;
+    g) GITIGNORE_ON=1;;
+    G) GITIGNORE_OFF=1;;
     k) KEEP=1;;
     l) LOCAL_VOLUMES=1;;
     N) NO_CACHE=1; BUILD=1;;
     v) VSCODE=1;;
-    *) echo "Usage: vibe [-B] [-d] [-D] [-k] [-l] [-N] [-v] [directory] [-- args...]"; exit 1;;
+    *) echo "Usage: vibe [-B] [-d] [-D] [-g] [-G] [-k] [-l] [-N] [-v] [directory] [-- args...]"; exit 1;;
   esac
 done
 shift $((OPTIND - 1))
@@ -96,9 +100,21 @@ if [[ -n "$WORKTREE" ]]; then
 else
   VIBE_DIR="${TARGET_DIR}/.claude"
 fi
+VIBE_DIR_EXISTED=0
+[[ -d "$VIBE_DIR" ]] && VIBE_DIR_EXISTED=1
 mkdir -p "$VIBE_DIR"
-if [[ ! -f "$VIBE_DIR/.gitignore" ]]; then
-  echo '*' > "$VIBE_DIR/.gitignore"
+GITIGNORE="$VIBE_DIR/.gitignore"
+if ((GITIGNORE_ON)); then
+  grep -qxF '*' "$GITIGNORE" 2>/dev/null || echo '*' >> "$GITIGNORE"
+elif ((GITIGNORE_OFF)); then
+  if [[ -f "$GITIGNORE" ]]; then
+    sed -i '/^[[:space:]]*\*[[:space:]]*$/d' "$GITIGNORE"
+    if ! grep -q '[^[:space:]]' "$GITIGNORE" 2>/dev/null; then
+      rm -f "$GITIGNORE"
+    fi
+  fi
+elif ! ((VIBE_DIR_EXISTED)); then
+  echo '*' > "$GITIGNORE"
 fi
 export VIBE_DIR
 
