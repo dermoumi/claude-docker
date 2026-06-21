@@ -302,12 +302,17 @@ services:
             esac
           done
           ((IS_READ)) || exit 0
+          ID="$$$$.$${RANDOM}"
           if ((LIST)) || [[ "$$TYPE" == "TARGETS" ]]; then
-            echo "LIST" > /tmp/clipboard_fifo
+            echo "$${ID} LIST" > /tmp/clipboard_fifo
           else
-            echo "$$TYPE" > /tmp/clipboard_fifo
+            echo "$${ID} $$TYPE" > /tmp/clipboard_fifo
           fi
-          cat /tmp/clipboard_fifo_resp
+          RESP="/tmp/clipboard_resp/$${ID}"
+          for _ in $$(seq 1 50); do
+            [[ -f "$$RESP" ]] && { cat "$$RESP"; rm -f "$$RESP"; exit 0; }
+            sleep 0.1
+          done
         ON_BUILD: "${ON_BUILD:-}"
       dockerfile_inline: |
         FROM debian:latest
@@ -402,7 +407,7 @@ services:
       - ${VSCODE_FIFO_RESP:-/dev/null}:/tmp/vscode_fifo_resp
       - ${BROWSER_FIFO:-/dev/null}:/tmp/browser_fifo
       - ${CLIPBOARD_FIFO:-/dev/null}:/tmp/clipboard_fifo
-      - ${CLIPBOARD_FIFO_RESP:-/dev/null}:/tmp/clipboard_fifo_resp
+      - ${CLIPBOARD_RESP_DIR:-/dev/null}:/tmp/clipboard_resp
       - ${VIBE_DIR}:${VIBE_MOUNT}
       - ${GRAPHIFY_DIR}:${GRAPHIFY_MOUNT}
 
@@ -439,6 +444,7 @@ if ((DOWN)); then
   compose down
   # Clean up any FIFOs for this project
   rm -f "${FIFO_DIR}"/vibe-vscode-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-browser-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-clipboard-"${PROJECT_NAME}"-*.fifo
+  rm -rf "${FIFO_DIR}"/vibe-clipboard-resp-"${PROJECT_NAME}"-*
   # Clean up socat port-forwarding state
   if [[ -f "/tmp/.vibe-socat-pids-${PROJECT_NAME}" ]]; then
     while read -r pid _; do kill "$pid" 2>/dev/null || true; done < "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
@@ -510,16 +516,16 @@ fi
 
 if [[ -n "$CLIP_CMD" ]]; then
   CLIPBOARD_FIFO="${FIFO_DIR}/vibe-clipboard-${PROJECT_NAME}-${FIFO_ID}.fifo"
-  CLIPBOARD_FIFO_RESP="${FIFO_DIR}/vibe-clipboard-${PROJECT_NAME}-${FIFO_ID}-resp.fifo"
-  for fifo in "$CLIPBOARD_FIFO" "$CLIPBOARD_FIFO_RESP"; do
-    mkfifo "$fifo"
-    chmod 600 "$fifo"
-  done
+  mkfifo "$CLIPBOARD_FIFO"
+  chmod 600 "$CLIPBOARD_FIFO"
+  CLIPBOARD_RESP_DIR="${FIFO_DIR}/vibe-clipboard-resp-${PROJECT_NAME}-${FIFO_ID}"
+  mkdir -p "$CLIPBOARD_RESP_DIR"
+  chmod 700 "$CLIPBOARD_RESP_DIR"
 else
   CLIPBOARD_FIFO=""
-  CLIPBOARD_FIFO_RESP=""
+  CLIPBOARD_RESP_DIR=""
 fi
-export CLIPBOARD_FIFO CLIPBOARD_FIFO_RESP
+export CLIPBOARD_FIFO CLIPBOARD_RESP_DIR
 
 
 # Check if the user has an on_build.sh script in ~/.vibe
@@ -662,20 +668,24 @@ CLIPBOARD_WATCHER_PID=""
 if [[ -n "$CLIP_CMD" ]]; then
   (
     while [[ -p "$CLIPBOARD_FIFO" ]]; do
-      if req=$(cat "$CLIPBOARD_FIFO" 2>/dev/null) && [[ -n "$req" ]]; then
+      if line=$(cat "$CLIPBOARD_FIFO" 2>/dev/null) && [[ -n "$line" ]]; then
+        id="${line%% *}"
+        req="${line#* }"
+        resp="${CLIPBOARD_RESP_DIR}/${id}"
         if [[ "$req" == "LIST" ]]; then
           if [[ "$CLIP_CMD" == "wl-paste" ]]; then
-            wl-paste -l 2>/dev/null > "$CLIPBOARD_FIFO_RESP" || echo -n > "$CLIPBOARD_FIFO_RESP"
+            wl-paste -l 2>/dev/null > "${resp}.tmp" || echo -n > "${resp}.tmp"
           else
-            xclip -selection clipboard -t TARGETS -o 2>/dev/null > "$CLIPBOARD_FIFO_RESP" || echo -n > "$CLIPBOARD_FIFO_RESP"
+            xclip -selection clipboard -t TARGETS -o 2>/dev/null > "${resp}.tmp" || echo -n > "${resp}.tmp"
           fi
         else
           if [[ "$CLIP_CMD" == "wl-paste" ]]; then
-            wl-paste --type "$req" 2>/dev/null > "$CLIPBOARD_FIFO_RESP" || echo -n > "$CLIPBOARD_FIFO_RESP"
+            wl-paste --type "$req" 2>/dev/null > "${resp}.tmp" || echo -n > "${resp}.tmp"
           else
-            xclip -selection clipboard -t "$req" -o 2>/dev/null > "$CLIPBOARD_FIFO_RESP" || echo -n > "$CLIPBOARD_FIFO_RESP"
+            xclip -selection clipboard -t "$req" -o 2>/dev/null > "${resp}.tmp" || echo -n > "${resp}.tmp"
           fi
         fi
+        mv "${resp}.tmp" "$resp"
       fi
     done
   ) &
@@ -708,7 +718,8 @@ cleanup() {
   rm -f /tmp/.vibe-socat-"${PROJECT_NAME}"-*
   if ! ((KEEP)) && ! ((TORN_DOWN)); then
     compose down
-    rm -f "$VSCODE_FIFO" "$VSCODE_FIFO_RESP" "$BROWSER_FIFO" "$CLIPBOARD_FIFO" "$CLIPBOARD_FIFO_RESP"
+    rm -f "$VSCODE_FIFO" "$VSCODE_FIFO_RESP" "$BROWSER_FIFO" "$CLIPBOARD_FIFO"
+    rm -rf "$CLIPBOARD_RESP_DIR"
   fi
 }
 trap cleanup EXIT
