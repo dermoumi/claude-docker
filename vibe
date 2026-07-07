@@ -781,7 +781,7 @@ If unexpected factors force you to deviate from the agreed plan, stop and discus
 Break large plans into small steps — each step should fit in one reviewable commit. NEVER make more than ~300 lines of changes without stopping to let the user review and commit. Complete one step at a time, then ask before moving to the next.
 Minimal comments: max 2 lines, only when the why isn't obvious from the code; prefer none.
 No decorative comments — no banners, no full-width lines, no ASCII art. Section markers should be plain and short.
-Never commit unless explicitly asked. Instead, suggest a single-line conventional commit command under 80 chars.
+Never commit unless explicitly asked. Instead, suggest a single-line conventional commit command under 80 chars. Each commit needs its own explicit request — one approval does not authorize future commits.
 Never push to a remote repository.
 "
 
