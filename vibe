@@ -439,7 +439,7 @@ FIFO_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 # Tear down the container and exit if requested
 if ((DOWN)); then
   docker rm -f "$CONTAINER_NAME" &>/dev/null || true
-  # Clean up any FIFOs for this project
+  while docker inspect "$CONTAINER_NAME" &>/dev/null; do sleep 0.1; done
   rm -f "${FIFO_DIR}"/vibe-vscode-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-browser-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-clipboard-"${PROJECT_NAME}"-*.fifo
   rm -rf "${FIFO_DIR}"/vibe-clipboard-resp-"${PROJECT_NAME}"-*
   # Clean up socat port-forwarding state
@@ -569,7 +569,12 @@ if [[ -n "$WORKTREE" ]]; then
   VOLUMES+=(-v "$TARGET_DIR/$WORKTREE_REL:$TARGET_DIR/$WORKTREE_REL")
 fi
 
-docker rm -f "$CONTAINER_NAME" &>/dev/null || true
+remove_container() {
+  docker rm -f "$CONTAINER_NAME" &>/dev/null || true
+  while docker inspect "$CONTAINER_NAME" &>/dev/null; do sleep 0.1; done
+}
+
+remove_container
 
 build_image() {
   docker build -t "$IMAGE_NAME" \
@@ -833,7 +838,7 @@ cleanup() {
   fi
   rm -f /tmp/.vibe-socat-"${PROJECT_NAME}"-*
   if ! ((KEEP)) && ! ((TORN_DOWN)); then
-    docker rm -f "$CONTAINER_NAME" &>/dev/null || true
+    remove_container
     rm -f "$VSCODE_FIFO" "$VSCODE_FIFO_RESP" "$BROWSER_FIFO" "$CLIPBOARD_FIFO"
     rm -rf "$CLIPBOARD_RESP_DIR"
   fi
@@ -903,7 +908,7 @@ clear
 
 # Tear down container before worktree removal so the mount is released
 if [[ -n "$WORKTREE" ]] && ! ((KEEP)); then
-  docker rm -f "$CONTAINER_NAME" &>/dev/null || true
+  remove_container
   rm -f "$VSCODE_FIFO" "$VSCODE_FIFO_RESP" "$BROWSER_FIFO"
   TORN_DOWN=1
 fi
