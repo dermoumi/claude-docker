@@ -206,7 +206,6 @@ services:
       args:
         UID: ${UID:-1000}
         GID: ${GID:-1000}
-        TARGET_DIR: ${TARGET_DIR}
         ENTRYPOINT: |
           #!/bin/bash
 
@@ -272,6 +271,16 @@ services:
             }
           " 2>/dev/null || true
 
+          if [[ -n "$${WORKDIR:-}" ]]; then
+            sudo mkdir -p "$$WORKDIR" && sudo chown $$(id -u):$$(id -g) "$$WORKDIR"
+            cd "$$WORKDIR"
+          fi
+
+          if [[ -n "$${ON_BUILD:-}" && ! -f /tmp/.on_build_done ]]; then
+            eval "$$ON_BUILD"
+            touch /tmp/.on_build_done
+          fi
+
           if [[ ! -f /tmp/.graphify_installed ]]; then
             graphify install &>/dev/null || true
             touch /tmp/.graphify_installed
@@ -333,7 +342,6 @@ services:
             [[ -f "$$RESP" ]] && { cat "$$RESP"; rm -f "$$RESP"; exit 0; }
             sleep 0.1
           done
-        ON_BUILD: "${ON_BUILD:-}"
       dockerfile_inline: |
         FROM debian:latest
 
@@ -396,22 +404,13 @@ services:
           && sudo chmod +x /entrypoint.sh
         ENTRYPOINT ["/entrypoint.sh"]
 
-        # Set the working directory
-        ARG TARGET_DIR
-        RUN sudo mkdir -p "$$TARGET_DIR" \
-          && sudo chown $$UID:$$GID "$$TARGET_DIR"
-        WORKDIR $$TARGET_DIR
-
-        # Run the ON_BUILD script if provided (used to pre-install tools)
-        ARG ON_BUILD
-        RUN if [ -n "$$ON_BUILD" ]; then \
-          echo "$$ON_BUILD" | bash; \
-        fi
-
         # Initial command to just keep the container running
         CMD ["bash", "-c", "sleep infinity"]
+    image: vibe-base
     environment:
       - GPG_PUBKEYS=${GPG_PUBKEYS:-}
+      - WORKDIR=${TARGET_DIR}
+      - ON_BUILD=${ON_BUILD:-}
 
     volumes:
       - ${TARGET_DIR}:${TARGET_DIR}${VOLUME_RO:-}
