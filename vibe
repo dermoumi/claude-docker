@@ -542,7 +542,7 @@ build_image() {
     --build-arg "CODE_WRAPPER=$CODE_WRAPPER" \
     --build-arg "BROWSER_WRAPPER=$BROWSER_WRAPPER" \
     --build-arg "CLIPBOARD_WRAPPER=$CLIPBOARD_WRAPPER" \
-    "$@" -f - /dev/null <<< "$DOCKERFILE"
+    "$@" - <<< "$DOCKERFILE"
 }
 
 if ((BUILD)); then
