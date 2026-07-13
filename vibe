@@ -630,6 +630,7 @@ if command -v socat &>/dev/null; then
     done
   ) &
   PORT_WATCHER_PID=$!
+  disown
 elif [[ ! -f "$HOME/.claude-docker/.no-socat-warning" ]]; then
   echo "Warning: 'socat' is not installed. OAuth login callback won't work."
   echo "Install it with your package manager (e.g. sudo pacman -S socat)."
@@ -727,6 +728,7 @@ if ((IS_MACOS)); then
       done
     ) &
     WATCHER_PID=$!
+    disown
   fi
 
   if [[ -n "$OPEN_CMD" ]]; then
@@ -742,6 +744,7 @@ if ((IS_MACOS)); then
       done
     ) &
     BROWSER_WATCHER_PID=$!
+    disown
   fi
 
   if [[ -n "$CLIP_CMD" ]]; then
@@ -761,6 +764,7 @@ if ((IS_MACOS)); then
       done
     ) &
     CLIPBOARD_WATCHER_PID=$!
+    disown
   fi
 
 else
@@ -774,6 +778,7 @@ else
       done
     ) &
     WATCHER_PID=$!
+    disown
   fi
 
   if [[ -n "$OPEN_CMD" ]]; then
@@ -785,6 +790,7 @@ else
       done
     ) &
     BROWSER_WATCHER_PID=$!
+    disown
   fi
 
   if [[ -n "$CLIP_CMD" ]]; then
@@ -798,6 +804,7 @@ else
       done
     ) &
     CLIPBOARD_WATCHER_PID=$!
+    disown
   fi
 fi
 
