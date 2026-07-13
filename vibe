@@ -4,6 +4,9 @@ set -e
 
 tolower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
+IS_MACOS=0
+[[ "$(uname -s)" == "Darwin" ]] && IS_MACOS=1
+
 # Default modes
 DEBUG=0
 BUILD=0
@@ -241,11 +244,21 @@ else
   ln -sf "$HOME/.claude/claude.json" "$HOME/.claude.json"
 fi
 
-if [[ -p /tmp/vscode_fifo ]]; then
+if [[ "${VIBE_VSCODE:-}" == "1" ]]; then
+  mkdir -p /tmp/vscode_queue /tmp/vscode_resp
+fi
+if [[ "${VIBE_BROWSER:-}" == "1" ]]; then
+  mkdir -p /tmp/browser_queue
+fi
+if [[ "${VIBE_CLIPBOARD:-}" == "1" ]]; then
+  mkdir -p /tmp/clipboard_queue /tmp/clipboard_resp
+fi
+
+if [[ -p /tmp/vscode_fifo ]] || [[ -d /tmp/vscode_queue ]]; then
   export EDITOR="code -w"
 fi
 
-if [[ -p /tmp/browser_fifo ]]; then
+if [[ -p /tmp/browser_fifo ]] || [[ -d /tmp/browser_queue ]]; then
   export BROWSER="xdg-open"
 fi
 
@@ -290,22 +303,41 @@ for arg in "$@"; do
     ARGS+=("$(realpath "$arg")")
   fi
 done
-printf '"'"'%s\0'"'"' "${ARGS[@]}" > /tmp/vscode_fifo
-if [[ "$WAIT" -eq 1 ]]; then
-  read -r < /tmp/vscode_fifo_resp
+if [[ -d /tmp/vscode_queue ]]; then
+  ID="$$.$RANDOM"
+  printf '"'"'%s\0'"'"' "${ARGS[@]}" > "/tmp/vscode_queue/${ID}"
+  if [[ "$WAIT" -eq 1 ]]; then
+    for _ in $(seq 1 300); do
+      [[ -f "/tmp/vscode_resp/${ID}" ]] && { rm -f "/tmp/vscode_resp/${ID}"; exit 0; }
+      sleep 0.1
+    done
+  fi
+elif [[ -p /tmp/vscode_fifo ]]; then
+  printf '"'"'%s\0'"'"' "${ARGS[@]}" > /tmp/vscode_fifo
+  if [[ "$WAIT" -eq 1 ]]; then
+    read -r < /tmp/vscode_fifo_resp
+  fi
 fi
 '
 
 BROWSER_WRAPPER='#!/bin/bash
-if [[ -p /tmp/browser_fifo ]]; then
-  for arg in "$@"; do
+for arg in "$@"; do
+  if [[ -d /tmp/browser_queue ]]; then
+    echo "$arg" > "/tmp/browser_queue/$$.$RANDOM"
+  elif [[ -p /tmp/browser_fifo ]]; then
     echo "$arg" > /tmp/browser_fifo
-  done
-fi
+  fi
+done
 '
 
 CLIPBOARD_WRAPPER='#!/bin/bash
-[[ -p /tmp/clipboard_fifo ]] || exit 1
+if [[ -d /tmp/clipboard_queue ]]; then
+  IPC=queue
+elif [[ -p /tmp/clipboard_fifo ]]; then
+  IPC=fifo
+else
+  exit 1
+fi
 TYPE="image/png"
 IS_READ=0
 LIST=0
@@ -321,9 +353,14 @@ done
 ((IS_READ)) || exit 0
 ID="$$.$RANDOM"
 if ((LIST)) || [[ "$TYPE" == "TARGETS" ]]; then
-  echo "${ID} LIST" > /tmp/clipboard_fifo
+  REQ="LIST"
 else
-  echo "${ID} $TYPE" > /tmp/clipboard_fifo
+  REQ="$TYPE"
+fi
+if [[ "$IPC" == "queue" ]]; then
+  echo "$REQ" > "/tmp/clipboard_queue/${ID}"
+else
+  echo "${ID} ${REQ}" > /tmp/clipboard_fifo
 fi
 RESP="/tmp/clipboard_resp/${ID}"
 for _ in $(seq 1 50); do
@@ -430,23 +467,10 @@ if [[ -f "$HOME/.gitconfig" ]]; then
   export GITCONFIG="$HOME/.gitconfig"
 fi
 
-# Generate a unique FIFO ID for this session (shared by all FIFO bridges)
-FIFO_ID="$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' ')"
-
-# Setup the VS Code FIFOs if 'code' is available on the host
+# Detect host capabilities
 HAS_CODE=0
-if command -v code &>/dev/null; then
-  HAS_CODE=1
-  VSCODE_FIFO="${FIFO_DIR}/vibe-vscode-${PROJECT_NAME}-${FIFO_ID}.fifo"
-  VSCODE_FIFO_RESP="${FIFO_DIR}/vibe-vscode-${PROJECT_NAME}-${FIFO_ID}-resp.fifo"
-  for fifo in "$VSCODE_FIFO" "$VSCODE_FIFO_RESP"; do
-    mkfifo "$fifo"
-    chmod 600 "$fifo"
-  done
-  export VSCODE_FIFO VSCODE_FIFO_RESP
-fi
+command -v code &>/dev/null && HAS_CODE=1
 
-# Detect host browser open command
 if command -v open &>/dev/null; then
   OPEN_CMD="open"
 elif command -v xdg-open &>/dev/null; then
@@ -455,37 +479,46 @@ else
   OPEN_CMD=""
 fi
 
-# Setup the browser FIFO for forwarding URLs to the host browser
-if [[ -n "$OPEN_CMD" ]]; then
-  BROWSER_FIFO="${FIFO_DIR}/vibe-browser-${PROJECT_NAME}-${FIFO_ID}.fifo"
-  mkfifo "$BROWSER_FIFO"
-  chmod 600 "$BROWSER_FIFO"
-else
-  BROWSER_FIFO=""
-fi
-export BROWSER_FIFO
-
-# Setup clipboard FIFOs for proxying clipboard reads from the container
 if command -v wl-paste &>/dev/null; then
   CLIP_CMD="wl-paste"
 elif command -v xclip &>/dev/null; then
   CLIP_CMD="xclip"
+elif command -v pbpaste &>/dev/null; then
+  CLIP_CMD="pbpaste"
 else
   CLIP_CMD=""
 fi
 
-if [[ -n "$CLIP_CMD" ]]; then
-  CLIPBOARD_FIFO="${FIFO_DIR}/vibe-clipboard-${PROJECT_NAME}-${FIFO_ID}.fifo"
-  mkfifo "$CLIPBOARD_FIFO"
-  chmod 600 "$CLIPBOARD_FIFO"
-  CLIPBOARD_RESP_DIR="${FIFO_DIR}/vibe-clipboard-resp-${PROJECT_NAME}-${FIFO_ID}"
-  mkdir -p "$CLIPBOARD_RESP_DIR"
-  chmod 700 "$CLIPBOARD_RESP_DIR"
-else
-  CLIPBOARD_FIFO=""
-  CLIPBOARD_RESP_DIR=""
+# Setup IPC bridges (FIFOs on Linux, queue dirs polled via docker exec on macOS)
+VSCODE_FIFO="" VSCODE_FIFO_RESP="" BROWSER_FIFO="" CLIPBOARD_FIFO="" CLIPBOARD_RESP_DIR=""
+if ! ((IS_MACOS)); then
+  FIFO_ID="$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' ')"
+
+  if ((HAS_CODE)); then
+    VSCODE_FIFO="${FIFO_DIR}/vibe-vscode-${PROJECT_NAME}-${FIFO_ID}.fifo"
+    VSCODE_FIFO_RESP="${FIFO_DIR}/vibe-vscode-${PROJECT_NAME}-${FIFO_ID}-resp.fifo"
+    for fifo in "$VSCODE_FIFO" "$VSCODE_FIFO_RESP"; do
+      mkfifo "$fifo"
+      chmod 600 "$fifo"
+    done
+  fi
+
+  if [[ -n "$OPEN_CMD" ]]; then
+    BROWSER_FIFO="${FIFO_DIR}/vibe-browser-${PROJECT_NAME}-${FIFO_ID}.fifo"
+    mkfifo "$BROWSER_FIFO"
+    chmod 600 "$BROWSER_FIFO"
+  fi
+
+  if [[ -n "$CLIP_CMD" ]]; then
+    CLIPBOARD_FIFO="${FIFO_DIR}/vibe-clipboard-${PROJECT_NAME}-${FIFO_ID}.fifo"
+    mkfifo "$CLIPBOARD_FIFO"
+    chmod 600 "$CLIPBOARD_FIFO"
+    CLIPBOARD_RESP_DIR="${FIFO_DIR}/vibe-clipboard-resp-${PROJECT_NAME}-${FIFO_ID}"
+    mkdir -p "$CLIPBOARD_RESP_DIR"
+    chmod 700 "$CLIPBOARD_RESP_DIR"
+  fi
 fi
-export CLIPBOARD_FIFO CLIPBOARD_RESP_DIR
+export VSCODE_FIFO VSCODE_FIFO_RESP BROWSER_FIFO CLIPBOARD_FIFO CLIPBOARD_RESP_DIR
 
 
 # Check if the user has an on_build.sh script in ~/.vibe
@@ -509,7 +542,7 @@ if ! ((LOCAL_VOLUMES)); then
   fi
 fi
 
-# Build volumes array (after FIFOs are set up)
+# Build volumes array
 VOLUMES=(
   -v "$TARGET_DIR:$TARGET_DIR${VOLUME_RO:-}"
   -v /var/run/docker.sock:/var/run/docker.sock
@@ -519,14 +552,18 @@ VOLUMES=(
   -v "${CLAUDE_JSON:-/dev/null}:/tmp/host_claude_json"
   -v "${CLAUDE_HOME:-${PROJECT_NAME}_claude_home}:/home/dev/.claude"
   -v "${CLAUDE_STATE:-${PROJECT_NAME}_claude_state}:/home/dev/.local/state/claude"
-  -v "${VSCODE_FIFO:-/dev/null}:/tmp/vscode_fifo"
-  -v "${VSCODE_FIFO_RESP:-/dev/null}:/tmp/vscode_fifo_resp"
-  -v "${BROWSER_FIFO:-/dev/null}:/tmp/browser_fifo"
-  -v "${CLIPBOARD_FIFO:-/dev/null}:/tmp/clipboard_fifo"
-  -v "${CLIPBOARD_RESP_DIR:-/dev/null}:/tmp/clipboard_resp"
   -v "$VIBE_DIR:$VIBE_MOUNT"
   -v "$GRAPHIFY_DIR:$GRAPHIFY_MOUNT"
 )
+if ! ((IS_MACOS)); then
+  VOLUMES+=(
+    -v "${VSCODE_FIFO:-/dev/null}:/tmp/vscode_fifo"
+    -v "${VSCODE_FIFO_RESP:-/dev/null}:/tmp/vscode_fifo_resp"
+    -v "${BROWSER_FIFO:-/dev/null}:/tmp/browser_fifo"
+    -v "${CLIPBOARD_FIFO:-/dev/null}:/tmp/clipboard_fifo"
+    -v "${CLIPBOARD_RESP_DIR:-/dev/null}:/tmp/clipboard_resp"
+  )
+fi
 if [[ -n "$WORKTREE" ]]; then
   VOLUMES+=(-v "$TARGET_DIR/.git:$TARGET_DIR/.git")
   VOLUMES+=(-v "$TARGET_DIR/$WORKTREE_REL:$TARGET_DIR/$WORKTREE_REL")
@@ -555,11 +592,20 @@ elif ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
   build_image
 fi
 
+ENVS=(
+  -e "GPG_PUBKEYS=${GPG_PUBKEYS:-}"
+  -e "WORKDIR=${TARGET_DIR}"
+  -e "ON_BUILD=${ON_BUILD:-}"
+)
+if ((IS_MACOS)); then
+  ((HAS_CODE)) && ENVS+=(-e "VIBE_VSCODE=1")
+  [[ -n "$OPEN_CMD" ]] && ENVS+=(-e "VIBE_BROWSER=1")
+  [[ -n "$CLIP_CMD" ]] && ENVS+=(-e "VIBE_CLIPBOARD=1")
+fi
+
 docker run -d --name "$CONTAINER_NAME" \
   --network bridge \
-  -e "GPG_PUBKEYS=${GPG_PUBKEYS:-}" \
-  -e "WORKDIR=${TARGET_DIR}" \
-  -e "ON_BUILD=${ON_BUILD:-}" \
+  "${ENVS[@]}" \
   "${VOLUMES[@]}" \
   "$IMAGE_NAME" bash -c "sleep infinity" >/dev/null
 
@@ -603,97 +649,156 @@ open_vscode() {
   code --folder-uri "vscode-remote://attached-container+${hex_id}${path}"
 }
 
-# Start background watcher and VS Code integration if 'code' is available
+# Process a VS Code request (NUL-delimited args)
+handle_vscode_request() {
+  local args_raw="$1" reply_func="$2"
+  local container_id hex_id uri_base
+  container_id="$(get_container_id)"
+  hex_id="$(printf '%s' "$container_id" | od -A n -t x1 | tr -d ' \n')"
+  uri_base="vscode-remote://attached-container+${hex_id}"
+
+  local flags=() paths=() all_args=()
+  while IFS= read -r -d '' arg; do all_args+=("$arg"); done < <(printf '%s' "$args_raw")
+  for arg in "${all_args[@]}"; do
+    if [[ "$arg" == -* ]]; then flags+=("$arg"); else paths+=("$arg"); fi
+  done
+
+  local code_args=("${flags[@]}") has_folder=0
+  for path in "${paths[@]}"; do
+    if docker exec "$container_id" test -d "$path" 2>/dev/null; then
+      has_folder=1
+      code_args+=("--folder-uri" "${uri_base}${path}")
+    else
+      code_args+=("--file-uri" "${uri_base}${path}")
+    fi
+  done
+  if [[ "$has_folder" -eq 0 ]]; then
+    code_args+=("--folder-uri" "${uri_base}${TARGET_DIR}")
+  fi
+
+  code "${code_args[@]}"
+  if [[ " ${flags[*]} " == *" -w "* || " ${flags[*]} " == *" --wait "* ]]; then
+    eval "$reply_func"
+  fi
+}
+
+# Read host clipboard content
+read_host_clipboard() {
+  local req="$1" outfile="$2"
+  if [[ "$req" == "LIST" ]]; then
+    if [[ "$CLIP_CMD" == "pbpaste" ]]; then
+      echo "text/plain" > "${outfile}.tmp"
+    elif [[ "$CLIP_CMD" == "wl-paste" ]]; then
+      wl-paste -l 2>/dev/null > "${outfile}.tmp" || echo -n > "${outfile}.tmp"
+    else
+      xclip -selection clipboard -t TARGETS -o 2>/dev/null > "${outfile}.tmp" || echo -n > "${outfile}.tmp"
+    fi
+  else
+    if [[ "$CLIP_CMD" == "pbpaste" ]]; then
+      pbpaste 2>/dev/null > "${outfile}.tmp" || echo -n > "${outfile}.tmp"
+    elif [[ "$CLIP_CMD" == "wl-paste" ]]; then
+      wl-paste --type "$req" 2>/dev/null > "${outfile}.tmp" || echo -n > "${outfile}.tmp"
+    else
+      xclip -selection clipboard -t "$req" -o 2>/dev/null > "${outfile}.tmp" || echo -n > "${outfile}.tmp"
+    fi
+  fi
+  mv "${outfile}.tmp" "$outfile"
+}
+
+# Start background watchers
 WATCHER_PID=""
-if ((HAS_CODE)); then
-  (
-    while [[ -p "$VSCODE_FIFO" ]]; do
-      if args_raw=$(cat "$VSCODE_FIFO" 2>/dev/null) && [[ -n "$args_raw" ]]; then
-        container_id="$(get_container_id)"
-        hex_id="$(printf '%s' "$container_id" | od -A n -t x1 | tr -d ' \n')"
-        uri_base="vscode-remote://attached-container+${hex_id}"
-
-        # Separate flags from paths (NUL-delimited protocol)
-        flags=()
-        paths=()
-        all_args=()
-        while IFS= read -r -d '' arg; do all_args+=("$arg"); done < <(printf '%s' "$args_raw")
-        for arg in "${all_args[@]}"; do
-          if [[ "$arg" == -* ]]; then
-            flags+=("$arg")
-          else
-            paths+=("$arg")
-          fi
-        done
-
-        # Build code command with correct URI type for each path
-        code_args=("${flags[@]}")
-        has_folder=0
-        for path in "${paths[@]}"; do
-          if docker exec "$container_id" test -d "$path" 2>/dev/null; then
-            has_folder=1
-            code_args+=("--folder-uri" "${uri_base}${path}")
-          else
-            code_args+=("--file-uri" "${uri_base}${path}")
-          fi
-        done
-
-        # Always attach to /workspace unless a directory was explicitly given
-        if [[ "$has_folder" -eq 0 ]]; then
-          code_args+=("--folder-uri" "${uri_base}${TARGET_DIR}")
-        fi
-
-        code "${code_args[@]}"
-        # Only signal response if -w/--wait was requested
-        if [[ " ${flags[*]} " == *" -w "* || " ${flags[*]} " == *" --wait "* ]]; then
-          echo "done" > "$VSCODE_FIFO_RESP"
-        fi
-      fi
-    done
-  ) &
-  WATCHER_PID=$!
-fi
-
-# Start browser watcher for forwarding URLs to the host browser
 BROWSER_WATCHER_PID=""
-if [[ -n "$OPEN_CMD" ]]; then
-  (
-    while [[ -p "$BROWSER_FIFO" ]]; do
-      if read -r url < "$BROWSER_FIFO" 2>/dev/null; then
-        $OPEN_CMD "$url" &>/dev/null &
-      fi
-    done
-  ) &
-  BROWSER_WATCHER_PID=$!
-fi
-
-# Start clipboard watcher for proxying clipboard reads to the host
 CLIPBOARD_WATCHER_PID=""
-if [[ -n "$CLIP_CMD" ]]; then
-  (
-    while [[ -p "$CLIPBOARD_FIFO" ]]; do
-      if line=$(cat "$CLIPBOARD_FIFO" 2>/dev/null) && [[ -n "$line" ]]; then
-        id="${line%% *}"
-        req="${line#* }"
-        resp="${CLIPBOARD_RESP_DIR}/${id}"
-        if [[ "$req" == "LIST" ]]; then
-          if [[ "$CLIP_CMD" == "wl-paste" ]]; then
-            wl-paste -l 2>/dev/null > "${resp}.tmp" || echo -n > "${resp}.tmp"
-          else
-            xclip -selection clipboard -t TARGETS -o 2>/dev/null > "${resp}.tmp" || echo -n > "${resp}.tmp"
-          fi
-        else
-          if [[ "$CLIP_CMD" == "wl-paste" ]]; then
-            wl-paste --type "$req" 2>/dev/null > "${resp}.tmp" || echo -n > "${resp}.tmp"
-          else
-            xclip -selection clipboard -t "$req" -o 2>/dev/null > "${resp}.tmp" || echo -n > "${resp}.tmp"
-          fi
+
+if ((IS_MACOS)); then
+  # macOS: poll container queue dirs via docker exec
+  CID="$CONTAINER_NAME"
+
+  if ((HAS_CODE)); then
+    (
+      while true; do
+        sleep 0.5
+        files="$(docker exec "$CID" ls /tmp/vscode_queue/ 2>/dev/null)" || continue
+        for f in $files; do
+          args_raw="$(docker exec "$CID" cat "/tmp/vscode_queue/$f" 2>/dev/null)" || continue
+          docker exec "$CID" rm -f "/tmp/vscode_queue/$f" 2>/dev/null
+          handle_vscode_request "$args_raw" "docker exec $CID touch /tmp/vscode_resp/$f"
+        done
+      done
+    ) &
+    WATCHER_PID=$!
+  fi
+
+  if [[ -n "$OPEN_CMD" ]]; then
+    (
+      while true; do
+        sleep 0.5
+        files="$(docker exec "$CID" ls /tmp/browser_queue/ 2>/dev/null)" || continue
+        for f in $files; do
+          url="$(docker exec "$CID" cat "/tmp/browser_queue/$f" 2>/dev/null)" || continue
+          docker exec "$CID" rm -f "/tmp/browser_queue/$f" 2>/dev/null
+          [[ -n "$url" ]] && $OPEN_CMD "$url" &>/dev/null &
+        done
+      done
+    ) &
+    BROWSER_WATCHER_PID=$!
+  fi
+
+  if [[ -n "$CLIP_CMD" ]]; then
+    (
+      while true; do
+        sleep 0.5
+        files="$(docker exec "$CID" ls /tmp/clipboard_queue/ 2>/dev/null)" || continue
+        for f in $files; do
+          req="$(docker exec "$CID" cat "/tmp/clipboard_queue/$f" 2>/dev/null)" || continue
+          docker exec "$CID" rm -f "/tmp/clipboard_queue/$f" 2>/dev/null
+          [[ -n "$req" ]] || continue
+          tmpfile="$(mktemp)"
+          read_host_clipboard "$req" "$tmpfile"
+          docker exec -i "$CID" tee "/tmp/clipboard_resp/$f" < "$tmpfile" >/dev/null
+          rm -f "$tmpfile"
+        done
+      done
+    ) &
+    CLIPBOARD_WATCHER_PID=$!
+  fi
+
+else
+  # Linux: read from FIFOs directly
+  if ((HAS_CODE)); then
+    (
+      while [[ -p "$VSCODE_FIFO" ]]; do
+        if args_raw=$(cat "$VSCODE_FIFO" 2>/dev/null) && [[ -n "$args_raw" ]]; then
+          handle_vscode_request "$args_raw" "echo done > $VSCODE_FIFO_RESP"
         fi
-        mv "${resp}.tmp" "$resp"
-      fi
-    done
-  ) &
-  CLIPBOARD_WATCHER_PID=$!
+      done
+    ) &
+    WATCHER_PID=$!
+  fi
+
+  if [[ -n "$OPEN_CMD" ]]; then
+    (
+      while [[ -p "$BROWSER_FIFO" ]]; do
+        if read -r url < "$BROWSER_FIFO" 2>/dev/null; then
+          $OPEN_CMD "$url" &>/dev/null &
+        fi
+      done
+    ) &
+    BROWSER_WATCHER_PID=$!
+  fi
+
+  if [[ -n "$CLIP_CMD" ]]; then
+    (
+      while [[ -p "$CLIPBOARD_FIFO" ]]; do
+        if line=$(cat "$CLIPBOARD_FIFO" 2>/dev/null) && [[ -n "$line" ]]; then
+          id="${line%% *}"
+          req="${line#* }"
+          read_host_clipboard "$req" "${CLIPBOARD_RESP_DIR}/${id}"
+        fi
+      done
+    ) &
+    CLIPBOARD_WATCHER_PID=$!
+  fi
 fi
 
 # Clean up watcher on exit
