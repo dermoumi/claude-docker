@@ -2,6 +2,8 @@
 
 set -e
 
+tolower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
+
 # Default modes
 DEBUG=0
 BUILD=0
@@ -179,7 +181,8 @@ else
   PROJECT_NAME="vibe-${DIR_BASENAME}-${DIR_HASH}"
 fi
 
-export PROJECT_NAME="${PROJECT_NAME,,}"
+PROJECT_NAME="$(tolower "$PROJECT_NAME")"
+export PROJECT_NAME
 
 # Mount .claude inside the worktree CWD so Claude can find it
 if [[ -n "${WORKTREE_REL:-}" ]]; then
@@ -585,7 +588,7 @@ elif [[ ! -f "$HOME/.claude-docker/.no-socat-warning" ]]; then
   echo "Warning: 'socat' is not installed. OAuth login callback won't work."
   echo "Install it with your package manager (e.g. sudo pacman -S socat)."
   read -rp "Continue? [Y/n/never] " ans
-  case "${ans,,}" in
+  case "$(tolower "$ans")" in
     n|no) exit 1 ;;
     never) mkdir -p "$HOME/.claude-docker" && touch "$HOME/.claude-docker/.no-socat-warning" ;;
   esac
@@ -613,7 +616,8 @@ if ((HAS_CODE)); then
         # Separate flags from paths (NUL-delimited protocol)
         flags=()
         paths=()
-        mapfile -d '' all_args < <(printf '%s' "$args_raw")
+        all_args=()
+        while IFS= read -r -d '' arg; do all_args+=("$arg"); done < <(printf '%s' "$args_raw")
         for arg in "${all_args[@]}"; do
           if [[ "$arg" == -* ]]; then
             flags+=("$arg")
