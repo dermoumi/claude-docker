@@ -21,7 +21,7 @@ Usage: vibe [flags] [directory] [-- args...]
 Flags:
   -B    Build the container image before starting
   -d    Tear down the container and exit
-  -D    Debug mode (print compose file and exit)
+  -D    Debug mode (shell into the container)
   -g    Force .claude/.gitignore on (add '*' entry)
   -G    Force .claude/.gitignore off (remove '*' entry)
   -h    Show this help message
@@ -157,7 +157,7 @@ sanitize() { echo "$1" | tr -cd "a-zA-Z0-9-"; }
 DIR_HASH="$(echo -n "$TARGET_DIR" | md5sum | cut -c1-4)"
 DIR_BASENAME="$(sanitize "$(basename "$TARGET_DIR")")"
 
-# Set terminal/tmux window name early (before slow compose up)
+# Set terminal/tmux window name early (before slow docker run)
 if [[ -n "$WORKTREE_BRANCH" ]]; then
   WINDOW_TITLE="w:${DIR_BASENAME}:${WORKTREE_BRANCH}"
 else
@@ -198,269 +198,207 @@ fi
 GID=$(id -g)
 export GID
 
-DOCKER_COMPOSE="$(cat <<'EOF'
-services:
-  claude:
-    network_mode: bridge
-    build:
-      args:
-        UID: ${UID:-1000}
-        GID: ${GID:-1000}
-        ENTRYPOINT: |
-          #!/bin/bash
+IMAGE_NAME="vibe-base"
+CONTAINER_NAME="${PROJECT_NAME}"
 
-          # Export the SSH_AUTH_SOCK if it exists
-          if [[ -S /tmp/ssh_auth_sock ]]; then
-            export SSH_AUTH_SOCK=/tmp/ssh_auth_sock
-          fi
+ENTRYPOINT_SCRIPT='#!/bin/bash
 
-          # Forward host GPG agent socket into the container
-          if [[ -S /tmp/gnupg_sock ]]; then
-            # Docker mounts sockets as root — fix permissions for dev user
-            sudo chmod 666 /tmp/gnupg_sock
-            # Kill any auto-started agent so it doesn't replace our symlink
-            gpgconf --kill gpg-agent 2>/dev/null || true
-            GNUPG_SOCK=$$(gpgconf --list-dir agent-socket)
-            mkdir -m 700 -p "$$(dirname "$$GNUPG_SOCK")"
-            ln -sf /tmp/gnupg_sock "$$GNUPG_SOCK"
-          fi
+if [[ -S /tmp/ssh_auth_sock ]]; then
+  export SSH_AUTH_SOCK=/tmp/ssh_auth_sock
+fi
 
-          # Import host GPG public keys once per container start
-          if [[ -n "$${GPG_PUBKEYS:-}" && ! -f /tmp/.gpg_keys_imported ]]; then
-            gpgconf --kill keyboxd 2>/dev/null || true
-            echo "$$GPG_PUBKEYS" | gpg --batch --no-autostart --import 2>/dev/null || true
-            # Trust imported keys ultimately (they're our own keys)
-            gpg --batch --no-autostart --list-keys --with-colons 2>/dev/null \
-              | awk -F: '/^fpr:/{print $$10":6:"}' \
-              | gpg --batch --no-autostart --import-ownertrust 2>/dev/null || true
-            gpgconf --kill keyboxd 2>/dev/null || true
-            touch /tmp/.gpg_keys_imported
-          fi
+if [[ -S /tmp/gnupg_sock ]]; then
+  sudo chmod 666 /tmp/gnupg_sock
+  gpgconf --kill gpg-agent 2>/dev/null || true
+  GNUPG_SOCK=$(gpgconf --list-dir agent-socket)
+  mkdir -m 700 -p "$(dirname "$GNUPG_SOCK")"
+  ln -sf /tmp/gnupg_sock "$GNUPG_SOCK"
+fi
 
-          if [[ -f /tmp/host_gitconfig ]]; then
-            ln -sf /tmp/host_gitconfig "$$HOME/.gitconfig"
-          fi
+if [[ -n "${GPG_PUBKEYS:-}" && ! -f /tmp/.gpg_keys_imported ]]; then
+  gpgconf --kill keyboxd 2>/dev/null || true
+  echo "$GPG_PUBKEYS" | gpg --batch --no-autostart --import 2>/dev/null || true
+  gpg --batch --no-autostart --list-keys --with-colons 2>/dev/null \
+    | awk -F: '"'"'/^fpr:/{print $10":6:"}'"'"' \
+    | gpg --batch --no-autostart --import-ownertrust 2>/dev/null || true
+  gpgconf --kill keyboxd 2>/dev/null || true
+  touch /tmp/.gpg_keys_imported
+fi
 
-          if [[ -f /tmp/host_claude_json ]]; then
-            ln -sf /tmp/host_claude_json "$$HOME/.claude.json"
-          else
-            if [[ ! -f "$$HOME/.claude/claude.json" ]]; then
-              echo '{}' > "$$HOME/.claude/claude.json"
-            fi
-            ln -sf "$$HOME/.claude/claude.json" "$$HOME/.claude.json"
-          fi
+if [[ -f /tmp/host_gitconfig ]]; then
+  ln -sf /tmp/host_gitconfig "$HOME/.gitconfig"
+fi
 
-          # Set EDITOR to the code wrapper if VS Code FIFO is available
-          if [[ -p /tmp/vscode_fifo ]]; then
-            export EDITOR="code -w"
-          fi
+if [[ -f /tmp/host_claude_json ]]; then
+  ln -sf /tmp/host_claude_json "$HOME/.claude.json"
+else
+  if [[ ! -f "$HOME/.claude/claude.json" ]]; then
+    echo '"'"'{}'"'"' > "$HOME/.claude/claude.json"
+  fi
+  ln -sf "$HOME/.claude/claude.json" "$HOME/.claude.json"
+fi
 
-          # Set BROWSER to the xdg-open wrapper if browser FIFO is available
-          if [[ -p /tmp/browser_fifo ]]; then
-            export BROWSER="xdg-open"
-          fi
+if [[ -p /tmp/vscode_fifo ]]; then
+  export EDITOR="code -w"
+fi
 
-          # Auto-trust the workspace directory so Claude doesn't prompt
-          node -e "
-            var fs = require('fs'), f = process.env.HOME + '/.claude.json';
-            var d = JSON.parse(fs.readFileSync(f, 'utf8'));
-            var p = d.projects = d.projects || {}, dir = process.cwd();
-            if (!p[dir] || !p[dir].hasTrustDialogAccepted) {
-              p[dir] = Object.assign(p[dir] || {}, {hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true});
-              fs.writeFileSync(f, JSON.stringify(d, null, 2));
-            }
-          " 2>/dev/null || true
+if [[ -p /tmp/browser_fifo ]]; then
+  export BROWSER="xdg-open"
+fi
 
-          if [[ -n "$${WORKDIR:-}" ]]; then
-            sudo mkdir -p "$$WORKDIR" && sudo chown $$(id -u):$$(id -g) "$$WORKDIR"
-            cd "$$WORKDIR"
-          fi
+node -e "
+  var fs = require('"'"'fs'"'"'), f = process.env.HOME + '"'"'/.claude.json'"'"';
+  var d = JSON.parse(fs.readFileSync(f, '"'"'utf8'"'"'));
+  var p = d.projects = d.projects || {}, dir = process.cwd();
+  if (!p[dir] || !p[dir].hasTrustDialogAccepted) {
+    p[dir] = Object.assign(p[dir] || {}, {hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true});
+    fs.writeFileSync(f, JSON.stringify(d, null, 2));
+  }
+" 2>/dev/null || true
 
-          if [[ -n "$${ON_BUILD:-}" && ! -f /tmp/.on_build_done ]]; then
-            eval "$$ON_BUILD"
-            touch /tmp/.on_build_done
-          fi
+if [[ -n "${WORKDIR:-}" ]]; then
+  sudo mkdir -p "$WORKDIR" && sudo chown $(id -u):$(id -g) "$WORKDIR"
+  cd "$WORKDIR"
+fi
 
-          if [[ ! -f /tmp/.graphify_installed ]]; then
-            graphify install &>/dev/null || true
-            touch /tmp/.graphify_installed
-          fi
+if [[ -n "${ON_BUILD:-}" && ! -f /tmp/.on_build_done ]]; then
+  eval "$ON_BUILD"
+  touch /tmp/.on_build_done
+fi
 
-          exec "$$@"
-        CODE_WRAPPER: |
-          #!/bin/bash
+if [[ ! -f /tmp/.graphify_installed ]]; then
+  graphify install &>/dev/null || true
+  touch /tmp/.graphify_installed
+fi
 
-          # FIFO-based host signaling
-          ARGS=()
-          WAIT=0
-          for arg in "$$@"; do
-            if [[ "$$arg" == "-w" || "$$arg" == "--wait" ]]; then
-              WAIT=1
-              ARGS+=("$$arg")
-            elif [[ "$$arg" == -* ]]; then
-              ARGS+=("$$arg")
-            else
-              ARGS+=("$$(realpath "$$arg")")
-            fi
-          done
-          printf '%s\0' "$${ARGS[@]}" > /tmp/vscode_fifo
-          # Only wait for host response if -w/--wait was passed
-          if [[ "$$WAIT" -eq 1 ]]; then
-            read -r < /tmp/vscode_fifo_resp
-          fi
-        BROWSER_WRAPPER: |
-          #!/bin/bash
-          if [[ -p /tmp/browser_fifo ]]; then
-            for arg in "$$@"; do
-              echo "$$arg" > /tmp/browser_fifo
-            done
-          fi
-        CLIPBOARD_WRAPPER: |
-          #!/bin/bash
-          [[ -p /tmp/clipboard_fifo ]] || exit 1
-          TYPE="image/png"
-          IS_READ=0
-          LIST=0
-          case "$$(basename "$$0")" in wl-paste) IS_READ=1 ;; esac
-          while [[ $$# -gt 0 ]]; do
-            case "$$1" in
-              -o|--output) IS_READ=1; shift ;;
-              -l|--list-types) LIST=1; IS_READ=1; shift ;;
-              -t|--type) TYPE="$$2"; shift 2 ;;
-              *) shift ;;
-            esac
-          done
-          ((IS_READ)) || exit 0
-          ID="$$$$.$${RANDOM}"
-          if ((LIST)) || [[ "$$TYPE" == "TARGETS" ]]; then
-            echo "$${ID} LIST" > /tmp/clipboard_fifo
-          else
-            echo "$${ID} $$TYPE" > /tmp/clipboard_fifo
-          fi
-          RESP="/tmp/clipboard_resp/$${ID}"
-          for _ in $$(seq 1 50); do
-            [[ -f "$$RESP" ]] && { cat "$$RESP"; rm -f "$$RESP"; exit 0; }
-            sleep 0.1
-          done
-      dockerfile_inline: |
-        FROM debian:latest
+exec "$@"
+'
 
-        # Install minimal dependencies
-        RUN apt-get update -y \
-          && apt-get upgrade -y \
-          && apt-get install -y --no-install-recommends \
-            curl build-essential git sudo docker.io openssh-client gnupg nodejs npm python3 python3-dev iproute2 socat \
-          && rm -rf /var/lib/apt/lists/*
+CODE_WRAPPER='#!/bin/bash
+ARGS=()
+WAIT=0
+for arg in "$@"; do
+  if [[ "$arg" == "-w" || "$arg" == "--wait" ]]; then
+    WAIT=1
+    ARGS+=("$arg")
+  elif [[ "$arg" == -* ]]; then
+    ARGS+=("$arg")
+  else
+    ARGS+=("$(realpath "$arg")")
+  fi
+done
+printf '"'"'%s\0'"'"' "${ARGS[@]}" > /tmp/vscode_fifo
+if [[ "$WAIT" -eq 1 ]]; then
+  read -r < /tmp/vscode_fifo_resp
+fi
+'
 
+BROWSER_WRAPPER='#!/bin/bash
+if [[ -p /tmp/browser_fifo ]]; then
+  for arg in "$@"; do
+    echo "$arg" > /tmp/browser_fifo
+  done
+fi
+'
 
-        # Create a non-root user and make it sudoer without password
-        ENV USER=dev
-        ENV GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
-        ARG UID=1000
-        ARG GID=1000
-        RUN groupdel $(getent group $GID | cut -d: -f1) 2>/dev/null || true \
-          && groupadd -g $$GID $$USER \
-          && useradd -mG sudo -g $$USER -s /bin/bash -u $$UID $$USER \
-          && echo "$$USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/$$USER
+CLIPBOARD_WRAPPER='#!/bin/bash
+[[ -p /tmp/clipboard_fifo ]] || exit 1
+TYPE="image/png"
+IS_READ=0
+LIST=0
+case "$(basename "$0")" in wl-paste) IS_READ=1 ;; esac
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output) IS_READ=1; shift ;;
+    -l|--list-types) LIST=1; IS_READ=1; shift ;;
+    -t|--type) TYPE="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+((IS_READ)) || exit 0
+ID="$$.$RANDOM"
+if ((LIST)) || [[ "$TYPE" == "TARGETS" ]]; then
+  echo "${ID} LIST" > /tmp/clipboard_fifo
+else
+  echo "${ID} $TYPE" > /tmp/clipboard_fifo
+fi
+RESP="/tmp/clipboard_resp/${ID}"
+for _ in $(seq 1 50); do
+  [[ -f "$RESP" ]] && { cat "$RESP"; rm -f "$RESP"; exit 0; }
+  sleep 0.1
+done
+'
 
-        # Switch to the non-root user
-        USER $$USER
-        WORKDIR /tmp
+read -r -d '' DOCKERFILE <<'DOCKERFILE_EOF' || true
+FROM debian:latest
 
-        # Premake some directories to avoid permission issues
-        RUN mkdir -p \
-          /home/$$USER/.local/bin \
-          /home/$$USER/.local/state/claude \
-          /home/$$USER/.claude
+RUN apt-get update -y \
+  && apt-get upgrade -y \
+  && apt-get install -y --no-install-recommends \
+    curl build-essential git sudo docker.io openssh-client gnupg nodejs npm python3 python3-dev iproute2 socat \
+  && rm -rf /var/lib/apt/lists/*
 
-        # Install Claude Code, uv, and graphify
-        RUN curl -fsSL https://claude.ai/install.sh | bash \
-          && curl -LsSf https://astral.sh/uv/install.sh | sh
-        ENV PATH="/home/$$USER/.local/bin:$$PATH"
-        RUN uv tool install graphifyy
+ENV USER=dev
+ENV GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
+ARG UID=1000
+ARG GID=1000
+RUN groupdel $(getent group $GID | cut -d: -f1) 2>/dev/null || true \
+  && groupadd -g $GID $USER \
+  && useradd -mG sudo -g $USER -s /bin/bash -u $UID $USER \
+  && echo "$USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/$USER
 
-        # --- Project-specific layers (cheap, change per project) ---
+USER $USER
+WORKDIR /tmp
 
-        # Create a 'code' wrapper that signals the host to open VS Code
-        ARG CODE_WRAPPER
-        RUN echo "$$CODE_WRAPPER" > /home/$$USER/.local/bin/code \
-          && chmod +x /home/$$USER/.local/bin/code
+RUN mkdir -p \
+  /home/$USER/.local/bin \
+  /home/$USER/.local/state/claude \
+  /home/$USER/.claude
 
-        # Create a browser wrapper for forwarding URLs to the host
-        ARG BROWSER_WRAPPER
-        RUN echo "$$BROWSER_WRAPPER" > /home/$$USER/.local/bin/xdg-open \
-          && chmod +x /home/$$USER/.local/bin/xdg-open
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+  && curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/home/$USER/.local/bin:$PATH"
+RUN uv tool install graphifyy
 
-        # Create clipboard wrappers that proxy reads to the host
-        ARG CLIPBOARD_WRAPPER
-        RUN echo "$$CLIPBOARD_WRAPPER" > /home/$$USER/.local/bin/xclip \
-          && chmod +x /home/$$USER/.local/bin/xclip \
-          && ln -s xclip /home/$$USER/.local/bin/xsel \
-          && ln -s xclip /home/$$USER/.local/bin/wl-paste
+ARG CODE_WRAPPER
+RUN echo "$CODE_WRAPPER" > /home/$USER/.local/bin/code \
+  && chmod +x /home/$USER/.local/bin/code
 
-        # Create entrypoint script
-        ARG ENTRYPOINT
-        RUN echo "$$ENTRYPOINT" | sudo tee /entrypoint.sh > /dev/null \
-          && sudo chmod +x /entrypoint.sh
-        ENTRYPOINT ["/entrypoint.sh"]
+ARG BROWSER_WRAPPER
+RUN echo "$BROWSER_WRAPPER" > /home/$USER/.local/bin/xdg-open \
+  && chmod +x /home/$USER/.local/bin/xdg-open
 
-        # Initial command to just keep the container running
-        CMD ["bash", "-c", "sleep infinity"]
-    image: vibe-base
-    environment:
-      - GPG_PUBKEYS=${GPG_PUBKEYS:-}
-      - WORKDIR=${TARGET_DIR}
-      - ON_BUILD=${ON_BUILD:-}
+ARG CLIPBOARD_WRAPPER
+RUN echo "$CLIPBOARD_WRAPPER" > /home/$USER/.local/bin/xclip \
+  && chmod +x /home/$USER/.local/bin/xclip \
+  && ln -s xclip /home/$USER/.local/bin/xsel \
+  && ln -s xclip /home/$USER/.local/bin/wl-paste
 
-    volumes:
-      - ${TARGET_DIR}:${TARGET_DIR}${VOLUME_RO:-}
-      # __WT_VOLUMES__
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ${SSH_AUTH_SOCK:-/dev/null}:/tmp/ssh_auth_sock
-      - ${GNUPG_SOCK:-/dev/null}:/tmp/gnupg_sock
-      - ${GITCONFIG:-/dev/null}:/tmp/host_gitconfig
-      - ${CLAUDE_JSON:-/dev/null}:/tmp/host_claude_json
-      - ${CLAUDE_HOME:-claude_home}:/home/dev/.claude
-      - ${CLAUDE_STATE:-claude_state}:/home/dev/.local/state/claude
-      - ${VSCODE_FIFO:-/dev/null}:/tmp/vscode_fifo
-      - ${VSCODE_FIFO_RESP:-/dev/null}:/tmp/vscode_fifo_resp
-      - ${BROWSER_FIFO:-/dev/null}:/tmp/browser_fifo
-      - ${CLIPBOARD_FIFO:-/dev/null}:/tmp/clipboard_fifo
-      - ${CLIPBOARD_RESP_DIR:-/dev/null}:/tmp/clipboard_resp
-      - ${VIBE_DIR}:${VIBE_MOUNT}
-      - ${GRAPHIFY_DIR}:${GRAPHIFY_MOUNT}
+ARG ENTRYPOINT
+RUN echo "$ENTRYPOINT" | sudo tee /entrypoint.sh > /dev/null \
+  && sudo chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
 
-volumes:
-  claude_home:
-  claude_state:
-EOF
-)"
+CMD ["bash", "-c", "sleep infinity"]
+DOCKERFILE_EOF
 
-# In worktree mode, mount parent repo as read-only with .git and worktree dir as read-write
+# In worktree mode, mount parent repo as read-only
 if [[ -n "$WORKTREE" ]]; then
-  export VOLUME_RO=":ro"
-  WT_VOLUMES="      - \${TARGET_DIR}/.git:\${TARGET_DIR}/.git
-      - \${TARGET_DIR}/${WORKTREE_REL}:\${TARGET_DIR}/${WORKTREE_REL}"
-  DOCKER_COMPOSE="${DOCKER_COMPOSE/      # __WT_VOLUMES__/$WT_VOLUMES}"
+  VOLUME_RO=":ro"
 fi
 
 export DOCKER_CONTEXT=default
 
-# Utility function to run docker compose with the correct arguments
-compose() {
-  GID=$(id -g) docker compose --project-name "$PROJECT_NAME" "$@"
-}
-
 get_container_id() {
-  docker ps --filter "name=${PROJECT_NAME}-claude-1" -q
+  docker ps -qf "name=^${CONTAINER_NAME}$"
 }
 
 # Use XDG_RUNTIME_DIR for FIFOs so they survive /tmp cleanups (systemd-tmpfiles)
 FIFO_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 
-# Tear down the compose file and exit if requested
+# Tear down the container and exit if requested
 if ((DOWN)); then
-  compose down
+  docker rm -f "$CONTAINER_NAME" &>/dev/null || true
   # Clean up any FIFOs for this project
   rm -f "${FIFO_DIR}"/vibe-vscode-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-browser-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-clipboard-"${PROJECT_NAME}"-*.fifo
   rm -rf "${FIFO_DIR}"/vibe-clipboard-resp-"${PROJECT_NAME}"-*
@@ -568,16 +506,59 @@ if ! ((LOCAL_VOLUMES)); then
   fi
 fi
 
-UP_ARGS=()
-compose down &>/dev/null
+# Build volumes array (after FIFOs are set up)
+VOLUMES=(
+  -v "$TARGET_DIR:$TARGET_DIR${VOLUME_RO:-}"
+  -v /var/run/docker.sock:/var/run/docker.sock
+  -v "${SSH_AUTH_SOCK:-/dev/null}:/tmp/ssh_auth_sock"
+  -v "${GNUPG_SOCK:-/dev/null}:/tmp/gnupg_sock"
+  -v "${GITCONFIG:-/dev/null}:/tmp/host_gitconfig"
+  -v "${CLAUDE_JSON:-/dev/null}:/tmp/host_claude_json"
+  -v "${CLAUDE_HOME:-${PROJECT_NAME}_claude_home}:/home/dev/.claude"
+  -v "${CLAUDE_STATE:-${PROJECT_NAME}_claude_state}:/home/dev/.local/state/claude"
+  -v "${VSCODE_FIFO:-/dev/null}:/tmp/vscode_fifo"
+  -v "${VSCODE_FIFO_RESP:-/dev/null}:/tmp/vscode_fifo_resp"
+  -v "${BROWSER_FIFO:-/dev/null}:/tmp/browser_fifo"
+  -v "${CLIPBOARD_FIFO:-/dev/null}:/tmp/clipboard_fifo"
+  -v "${CLIPBOARD_RESP_DIR:-/dev/null}:/tmp/clipboard_resp"
+  -v "$VIBE_DIR:$VIBE_MOUNT"
+  -v "$GRAPHIFY_DIR:$GRAPHIFY_MOUNT"
+)
+if [[ -n "$WORKTREE" ]]; then
+  VOLUMES+=(-v "$TARGET_DIR/.git:$TARGET_DIR/.git")
+  VOLUMES+=(-v "$TARGET_DIR/$WORKTREE_REL:$TARGET_DIR/$WORKTREE_REL")
+fi
+
+docker rm -f "$CONTAINER_NAME" &>/dev/null || true
+
+build_image() {
+  docker build -t "$IMAGE_NAME" \
+    --build-arg "UID=$(id -u)" \
+    --build-arg "GID=$(id -g)" \
+    --build-arg "ENTRYPOINT=$ENTRYPOINT_SCRIPT" \
+    --build-arg "CODE_WRAPPER=$CODE_WRAPPER" \
+    --build-arg "BROWSER_WRAPPER=$BROWSER_WRAPPER" \
+    --build-arg "CLIPBOARD_WRAPPER=$CLIPBOARD_WRAPPER" \
+    "$@" -f - /dev/null <<< "$DOCKERFILE"
+}
+
 if ((BUILD)); then
   if ((NO_CACHE)); then
-    compose --file - build --no-cache <<< "$DOCKER_COMPOSE"
+    build_image --no-cache
   else
-    UP_ARGS+=("--build")
+    build_image
   fi
+elif ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+  build_image
 fi
-compose --file - up "${UP_ARGS[@]}" -d <<< "$DOCKER_COMPOSE"
+
+docker run -d --name "$CONTAINER_NAME" \
+  --network bridge \
+  -e "GPG_PUBKEYS=${GPG_PUBKEYS:-}" \
+  -e "WORKDIR=${TARGET_DIR}" \
+  -e "ON_BUILD=${ON_BUILD:-}" \
+  "${VOLUMES[@]}" \
+  "$IMAGE_NAME" bash -c "sleep infinity" >/dev/null
 
 # Forward container listening ports to host via socat (for OAuth callbacks etc.)
 PORT_WATCHER_PID=""
@@ -736,7 +717,7 @@ cleanup() {
   fi
   rm -f /tmp/.vibe-socat-"${PROJECT_NAME}"-*
   if ! ((KEEP)) && ! ((TORN_DOWN)); then
-    compose down
+    docker rm -f "$CONTAINER_NAME" &>/dev/null || true
     rm -f "$VSCODE_FIFO" "$VSCODE_FIFO_RESP" "$BROWSER_FIFO" "$CLIPBOARD_FIFO"
     rm -rf "$CLIPBOARD_RESP_DIR"
   fi
@@ -752,13 +733,13 @@ if ((VSCODE)); then
   open_vscode "$TARGET_DIR"
 fi
 
-# Helper for compose exec with explicit working directory
+# Set up exec command
 if [[ -n "${WORKTREE_REL:-}" ]]; then
   WORKDIR="${TARGET_DIR}/${WORKTREE_REL}"
 else
   WORKDIR="${TARGET_DIR}"
 fi
-EXEC=(compose exec -w "$WORKDIR" claude)
+EXEC=(docker exec -it -w "$WORKDIR" "$CONTAINER_NAME")
 
 # Shell into the container if in debug mode
 if ((DEBUG)); then
@@ -794,7 +775,7 @@ fi
 
 TOOL_FLAGS=(--dangerously-skip-permissions --permission-mode plan --append-system-prompt "$SYSTEM_PROMPT")
 
-echo "Running 'claude' in container..."
+
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
   "${EXEC[@]}" /entrypoint.sh claude "${TOOL_FLAGS[@]}" "${EXTRA_ARGS[@]}"
 else
@@ -806,7 +787,7 @@ clear
 
 # Tear down container before worktree removal so the mount is released
 if [[ -n "$WORKTREE" ]] && ! ((KEEP)); then
-  compose down
+  docker rm -f "$CONTAINER_NAME" &>/dev/null || true
   rm -f "$VSCODE_FIFO" "$VSCODE_FIFO_RESP" "$BROWSER_FIFO"
   TORN_DOWN=1
 fi
