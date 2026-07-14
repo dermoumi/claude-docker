@@ -688,12 +688,44 @@ handle_vscode_request() {
   fi
 }
 
+PBPASTE_IMG_CACHE=""
+
 # Read host clipboard content
 read_host_clipboard() {
   local req="$1" outfile="$2"
   if [[ "$req" == "LIST" ]]; then
     if [[ "$CLIP_CMD" == "pbpaste" ]]; then
-      echo "text/plain" > "${outfile}.tmp"
+      local info types=""
+      PBPASTE_IMG_CACHE=""
+      info=$(osascript -e 'clipboard info' 2>/dev/null) || info=""
+      if [[ "$info" == *"«class PNGf»"* ]] || [[ "$info" == *"«class TIFF»"* ]]; then
+        types="image/png"
+        PBPASTE_IMG_CACHE="$(mktemp)"
+        osascript -l JavaScript -e '
+          ObjC.import("AppKit");
+          ObjC.import("Foundation");
+          var pb = $.NSPasteboard.generalPasteboard;
+          var data = pb.dataForType("public.png");
+          if (!data || data.isNil()) {
+            var tiffData = pb.dataForType("public.tiff");
+            if (tiffData && !tiffData.isNil()) {
+              var rep = $.NSBitmapImageRep.imageRepWithData(tiffData);
+              if (rep && !rep.isNil()) {
+                data = rep.representationUsingTypeProperties(4, $.NSDictionary.dictionary);
+              }
+            }
+          }
+          if (data && !data.isNil()) {
+            data.writeToFileAtomically("'"$PBPASTE_IMG_CACHE"'", true);
+          }
+        ' &>/dev/null
+        [[ -s "$PBPASTE_IMG_CACHE" ]] || { rm -f "$PBPASTE_IMG_CACHE"; PBPASTE_IMG_CACHE=""; types=""; }
+      fi
+      if [[ "$info" == *"«class utf8»"* ]]; then
+        types="${types:+$types
+}text/plain"
+      fi
+      echo "${types:-text/plain}" > "${outfile}.tmp"
     elif [[ "$CLIP_CMD" == "wl-paste" ]]; then
       wl-paste -l 2>/dev/null > "${outfile}.tmp" || echo -n > "${outfile}.tmp"
     else
@@ -701,7 +733,15 @@ read_host_clipboard() {
     fi
   else
     if [[ "$CLIP_CMD" == "pbpaste" ]]; then
-      pbpaste 2>/dev/null > "${outfile}.tmp" || echo -n > "${outfile}.tmp"
+      if [[ "$req" == "image/png" ]] && [[ -n "$PBPASTE_IMG_CACHE" ]] && [[ -s "$PBPASTE_IMG_CACHE" ]]; then
+        cp "$PBPASTE_IMG_CACHE" "${outfile}.tmp"
+        rm -f "$PBPASTE_IMG_CACHE"
+        PBPASTE_IMG_CACHE=""
+      elif [[ "$req" == "image/png" ]]; then
+        echo -n > "${outfile}.tmp"
+      else
+        pbpaste 2>/dev/null > "${outfile}.tmp" || echo -n > "${outfile}.tmp"
+      fi
     elif [[ "$CLIP_CMD" == "wl-paste" ]]; then
       wl-paste --type "$req" 2>/dev/null > "${outfile}.tmp" || echo -n > "${outfile}.tmp"
     else
