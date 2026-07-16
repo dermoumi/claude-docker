@@ -15,7 +15,6 @@ KEEP=0
 TORN_DOWN=0
 VSCODE=0
 NO_CACHE=0
-LOCAL_VOLUMES=0
 GITIGNORE_ON=0
 GITIGNORE_OFF=0
 
@@ -31,7 +30,6 @@ Flags:
   -G    Force .claude/.gitignore off (remove '*' entry)
   -h    Show this help message
   -k    Keep container running on exit
-  -l    Use local Docker volumes instead of host directories
   -N    Build with no cache (implies -B)
   -v    Open VS Code attached to the container
 EOF
@@ -39,7 +37,7 @@ EOF
 }
 
 # Parse flags
-while getopts "BdDgGhklNv" opt; do
+while getopts "BdDgGhkNv" opt; do
   case $opt in
     B) BUILD=1;;
     d) DOWN=1;;
@@ -48,7 +46,6 @@ while getopts "BdDgGhklNv" opt; do
     G) GITIGNORE_OFF=1;;
     h) usage;;
     k) KEEP=1;;
-    l) LOCAL_VOLUMES=1;;
     N) NO_CACHE=1; BUILD=1;;
     v) VSCODE=1;;
     *) usage;;
@@ -578,18 +575,21 @@ if [[ -f "$ON_BUILD_SCRIPT" ]]; then
   export ON_BUILD
 fi
 
-# Setup host config directories (default) or use local Docker volumes (-l flag)
-if ! ((LOCAL_VOLUMES)); then
-  export CLAUDE_STATE="${HOME}/.local/state/claude"
-  export CLAUDE_HOME="${HOME}/.claude"
+CLAUDE_HOME="${HOME}/.claude"
+CLAUDE_STATE="${HOME}/.local/state/claude"
+CLAUDE_PROJECTS="${VIBE_DIR}/.projects"
+mkdir -p "$CLAUDE_HOME" "$CLAUDE_STATE" "$CLAUDE_PROJECTS"
 
-  mkdir -p "$CLAUDE_STATE" "$CLAUDE_HOME"
+# Migrate existing conversation history to project-local storage (one-time)
+PROJECT_KEY="$(echo "$TARGET_DIR" | sed 's/[^a-zA-Z0-9]/-/g')"
+HOST_PROJECT_DIR="${CLAUDE_HOME}/projects/${PROJECT_KEY}"
+if [[ -d "$HOST_PROJECT_DIR" ]] && [[ ! -d "${CLAUDE_PROJECTS}/${PROJECT_KEY}" ]]; then
+  mv "$HOST_PROJECT_DIR" "${CLAUDE_PROJECTS}/${PROJECT_KEY}"
+fi
 
-  # Ensure the file exists with valid JSON so Docker can mount it as a file
-  export CLAUDE_JSON="${HOME}/.claude.json"
-  if [[ ! -f "$CLAUDE_JSON" ]]; then
-    echo '{}' > "$CLAUDE_JSON"
-  fi
+CLAUDE_JSON="${HOME}/.claude.json"
+if [[ ! -f "$CLAUDE_JSON" ]]; then
+  echo '{}' > "$CLAUDE_JSON"
 fi
 
 # Build volumes array
@@ -599,9 +599,10 @@ VOLUMES=(
   -v "${SSH_AUTH_SOCK:-/dev/null}:/tmp/ssh_auth_sock"
   -v "${GNUPG_SOCK:-/dev/null}:/tmp/gnupg_sock"
   -v "${GITCONFIG:-/dev/null}:/tmp/host_gitconfig"
-  -v "${CLAUDE_JSON:-/dev/null}:/tmp/host_claude_json"
-  -v "${CLAUDE_HOME:-${PROJECT_NAME}_claude_home}:/home/dev/.claude"
-  -v "${CLAUDE_STATE:-${PROJECT_NAME}_claude_state}:/home/dev/.local/state/claude"
+  -v "${CLAUDE_JSON}:/tmp/host_claude_json"
+  -v "${CLAUDE_HOME}:/home/dev/.claude"
+  -v "${CLAUDE_PROJECTS}:/home/dev/.claude/projects"
+  -v "${CLAUDE_STATE}:/home/dev/.local/state/claude"
   -v "$VIBE_DIR:$VIBE_MOUNT"
   -v "$GRAPHIFY_DIR:$GRAPHIFY_MOUNT"
 )
