@@ -17,6 +17,7 @@ VSCODE=0
 NO_CACHE=0
 GITIGNORE_ON=0
 GITIGNORE_OFF=0
+PARENT_DIR=""
 
 usage() {
   cat <<'EOF'
@@ -31,13 +32,14 @@ Flags:
   -h    Show this help message
   -k    Keep container running on exit
   -N    Build with no cache (implies -B)
+  -P    Mount parent directory read-only for sibling repo access
   -v    Open VS Code attached to the container
 EOF
   exit 0
 }
 
 # Parse flags
-while getopts "BdDgGhkNv" opt; do
+while getopts "BdDgGhkNP:v" opt; do
   case $opt in
     B) BUILD=1;;
     d) DOWN=1;;
@@ -47,6 +49,7 @@ while getopts "BdDgGhkNv" opt; do
     h) usage;;
     k) KEEP=1;;
     N) NO_CACHE=1; BUILD=1;;
+    P) PARENT_DIR="$(realpath -- "$OPTARG")";;
     v) VSCODE=1;;
     *) usage;;
   esac
@@ -116,6 +119,17 @@ if [[ ! -d "$TARGET_DIR" ]]; then
 fi
 export TARGET_DIR
 
+if [[ -n "$PARENT_DIR" ]]; then
+  if [[ ! -d "$PARENT_DIR" ]]; then
+    echo "Error: parent directory '$PARENT_DIR' does not exist" >&2
+    exit 1
+  fi
+  case "$TARGET_DIR" in
+    "$PARENT_DIR"/*) ;;
+    *) echo "Error: '$TARGET_DIR' is not inside '$PARENT_DIR'" >&2; exit 1;;
+  esac
+fi
+
 # Ensure .claude/ exists and mount it
 if [[ -n "$WORKTREE" ]]; then
   VIBE_DIR="$(git rev-parse --show-toplevel)/.claude"
@@ -140,7 +154,32 @@ elif ! ((VIBE_DIR_EXISTED)); then
 fi
 export VIBE_DIR
 
-# Inject managed rules into .claude/CLAUDE.md
+# Inject/update a managed section in .claude/CLAUDE.md
+# Usage: inject_section "## Heading" "content"
+inject_section() {
+  local heading="$1" content="$2"
+  local claude_md="$VIBE_DIR/CLAUDE.md"
+  local block
+  block="$(printf '%s\n\n%s' "$heading" "$content")"
+
+  if [[ ! -f "$claude_md" ]]; then
+    printf '%s\n' "$block" > "$claude_md"
+    return
+  fi
+
+  if ! grep -qF "$heading" "$claude_md"; then
+    printf '\n\n%s\n' "$block" >> "$claude_md"
+    return
+  fi
+
+  awk -v heading="$heading" -v block="$block" '
+    $0 == heading { skip=1; printf "%s\n\n", block; next }
+    skip && /^## / { skip=0 }
+    !skip { print }
+  ' "$claude_md" > "$claude_md.tmp" && mv "$claude_md.tmp" "$claude_md"
+}
+
+# Inject personal rules
 DEFAULT_RULES="$(cat <<'RULES'
 - Challenge user decisions when you see a better approach.
 - Simple and clean over hacky or overengineered.
@@ -153,42 +192,27 @@ RULES
 )"
 
 RULES_FILE="$HOME/.claude-docker/rules.md"
-RULES_HEADING="## Personal Rules (maintained by the vibe utility)"
-
-inject_rules() {
-  local rules
-  if [[ -f "$RULES_FILE" ]]; then
-    rules="$(cat "$RULES_FILE")"
-    if echo "$rules" | grep -q '^##'; then
-      echo "Error: $RULES_FILE contains '##' headings which would break the rules delimiter" >&2
-      exit 1
-    fi
-  else
-    rules="$DEFAULT_RULES"
+if [[ -f "$RULES_FILE" ]]; then
+  RULES_CONTENT="$(cat "$RULES_FILE")"
+  if echo "$RULES_CONTENT" | grep -q '^##'; then
+    echo "Error: $RULES_FILE contains '##' headings which would break the section delimiter" >&2
+    exit 1
   fi
+else
+  RULES_CONTENT="$DEFAULT_RULES"
+fi
+inject_section "## Personal Rules (maintained by the vibe utility)" "$RULES_CONTENT"
 
-  local claude_md="$VIBE_DIR/CLAUDE.md"
-  local block
-  block="$(printf '%s\n\n%s' "$RULES_HEADING" "$rules")"
+# Inject environment context
+ENV_CONTENT="$(cat <<'ENV'
+Disposable Ubuntu Docker container with passwordless sudo. Install freely.
+After installing a tool, append its directory to ~/.bin-paths.
+At session start, run: export PATH="$(cat ~/.bin-paths 2>/dev/null | tr '\n' ':'):$PATH"
 
-  if [[ ! -f "$claude_md" ]]; then
-    printf '%s\n' "$block" > "$claude_md"
-    return
-  fi
-
-  if ! grep -qF "$RULES_HEADING" "$claude_md"; then
-    printf '\n\n%s\n' "$block" >> "$claude_md"
-    return
-  fi
-
-  awk -v heading="$RULES_HEADING" -v block="$block" '
-    $0 == heading { skip=1; printf "%s\n\n", block; next }
-    skip && /^## / { skip=0 }
-    !skip { print }
-  ' "$claude_md" > "$claude_md.tmp" && mv "$claude_md.tmp" "$claude_md"
-}
-
-inject_rules
+Save project context in .claude/ (PLAN.md, PROGRESS.md at root; MEMORY.md and per-memory files under .claude/memory/). .claude/ is bind-mounted from the parent repo, persists across worktrees. Max 150 lines per file.
+ENV
+)"
+inject_section "## Environment (maintained by the vibe utility)" "$ENV_CONTENT"
 
 # Ensure graphify-out/ exists and mount it
 if [[ -n "$WORKTREE" ]]; then
@@ -619,6 +643,9 @@ if [[ -n "$WORKTREE" ]]; then
   VOLUMES+=(-v "$TARGET_DIR/.git:$TARGET_DIR/.git")
   VOLUMES+=(-v "$TARGET_DIR/$WORKTREE_REL:$TARGET_DIR/$WORKTREE_REL")
 fi
+if [[ -n "$PARENT_DIR" ]]; then
+  VOLUMES+=(-v "$PARENT_DIR:/repos:ro")
+fi
 
 remove_container() {
   docker rm -f "$CONTAINER_NAME" &>/dev/null || true
@@ -960,23 +987,28 @@ if ((DEBUG)); then
 fi
 
 # Run Claude Code in the container
-SYSTEM_PROMPT="
-You are running inside a disposable Ubuntu Docker container with passwordless sudo. Install anything you need freely.
-After installing a tool, append its directory to ~/.bin-paths.
-At session start, run: export PATH=\"\$(cat ~/.bin-paths 2>/dev/null | tr '\\n' ':'):\$PATH\"
-
-Save project-related context and memory in .claude/ — context files (PLAN.md, PROGRESS.md, etc.) at the .claude/ root, and auto-memory files (MEMORY.md and per-memory files) under .claude/memory/. .claude/ is bind-mounted from the parent repo and persists across all git worktrees of this project. Max 150 lines per file.
-"
+SYSTEM_PROMPT=""
 
 if [[ -n "$WORKTREE" ]]; then
-  SYSTEM_PROMPT+="
+  SYSTEM_PROMPT+="$(cat <<EOF
 You are working inside a git worktree for branch '$WORKTREE_BRANCH' at $WORKDIR.
 The parent repository is mounted read-only — only this worktree directory and .git/ are writable.
 You may read parent files (e.g. to compare against main), but do not attempt to modify them.
-"
+EOF
+)"
 fi
 
-TOOL_FLAGS=(--dangerously-skip-permissions --permission-mode plan --append-system-prompt "$SYSTEM_PROMPT")
+if [[ -n "$PARENT_DIR" ]]; then
+  SYSTEM_PROMPT+="$(cat <<EOF
+Sibling repos available read-only at /repos/. Working project: $(realpath --relative-to="$PARENT_DIR" "$TARGET_DIR").
+EOF
+)"
+fi
+
+TOOL_FLAGS=(--dangerously-skip-permissions --permission-mode plan)
+if [[ -n "$SYSTEM_PROMPT" ]]; then
+  TOOL_FLAGS+=(--append-system-prompt "$SYSTEM_PROMPT")
+fi
 
 
 if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
