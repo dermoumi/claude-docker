@@ -180,7 +180,7 @@ inject_section() {
 }
 
 # Inject personal rules
-DEFAULT_RULES="$(cat <<'RULES'
+read -r -d '' DEFAULT_RULES <<'RULES' || true
 - Challenge user decisions when you see a better approach.
 - Simple and clean over hacky or overengineered.
 - If deviating from the plan, stop and discuss first.
@@ -189,7 +189,6 @@ DEFAULT_RULES="$(cat <<'RULES'
 - Never commit unless asked. Suggest a conventional commit command (under 80 chars). One approval ≠ blanket permission.
 - Never push to remote.
 RULES
-)"
 
 RULES_FILE="$HOME/.claude-docker/rules.md"
 if [[ -f "$RULES_FILE" ]]; then
@@ -204,14 +203,13 @@ fi
 inject_section "## Personal Rules (maintained by the vibe utility)" "$RULES_CONTENT"
 
 # Inject environment context
-ENV_CONTENT="$(cat <<'ENV'
+read -r -d '' ENV_CONTENT <<'ENV' || true
 Disposable Ubuntu Docker container with passwordless sudo. Install freely.
 After installing a tool, append its directory to ~/.bin-paths.
 At session start, run: export PATH="$(cat ~/.bin-paths 2>/dev/null | tr '\n' ':'):$PATH"
 
 Save project context in .claude/ (PLAN.md, PROGRESS.md at root; MEMORY.md and per-memory files under .claude/memory/). .claude/ is bind-mounted from the parent repo, persists across worktrees. Max 150 lines per file.
 ENV
-)"
 inject_section "## Environment (maintained by the vibe utility)" "$ENV_CONTENT"
 
 # Ensure graphify-out/ exists and mount it
@@ -990,19 +988,16 @@ fi
 SYSTEM_PROMPT=""
 
 if [[ -n "$WORKTREE" ]]; then
-  SYSTEM_PROMPT+="$(cat <<EOF
+  read -r -d '' _PROMPT <<EOF || true
 You are working inside a git worktree for branch '$WORKTREE_BRANCH' at $WORKDIR.
 The parent repository is mounted read-only — only this worktree directory and .git/ are writable.
 You may read parent files (e.g. to compare against main), but do not attempt to modify them.
 EOF
-)"
+  SYSTEM_PROMPT+="$_PROMPT"
 fi
 
 if [[ -n "$PARENT_DIR" ]]; then
-  SYSTEM_PROMPT+="$(cat <<EOF
-Sibling repos available read-only at /repos/. Working project: $(realpath --relative-to="$PARENT_DIR" "$TARGET_DIR").
-EOF
-)"
+  SYSTEM_PROMPT+="Sibling repos available read-only at /repos/. Working project: $(realpath --relative-to="$PARENT_DIR" "$TARGET_DIR")."
 fi
 
 TOOL_FLAGS=(--dangerously-skip-permissions --permission-mode plan)
