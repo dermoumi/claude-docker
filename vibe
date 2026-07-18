@@ -172,7 +172,8 @@ inject_section() {
     return
   fi
 
-  awk -v heading="$heading" -v block="$block" '
+  _AWK_HEADING="$heading" _AWK_BLOCK="$block" awk '
+    BEGIN { heading=ENVIRON["_AWK_HEADING"]; block=ENVIRON["_AWK_BLOCK"] }
     $0 == heading { skip=1; printf "%s\n\n", block; next }
     skip && /^## / { skip=0 }
     !skip { print }
