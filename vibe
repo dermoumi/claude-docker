@@ -280,6 +280,7 @@ CONTAINER_NAME="${PROJECT_NAME}"
 ENTRYPOINT_SCRIPT='#!/bin/bash
 
 if [[ -S /tmp/ssh_auth_sock ]]; then
+  sudo chmod 666 /tmp/ssh_auth_sock
   export SSH_AUTH_SOCK=/tmp/ssh_auth_sock
 fi
 
