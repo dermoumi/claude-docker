@@ -400,12 +400,11 @@ done
 '
 
 CLIPBOARD_WRAPPER='#!/bin/bash
+IPC=""
 if [[ -d /tmp/clipboard_queue ]]; then
   IPC=queue
 elif [[ -p /tmp/clipboard_fifo ]]; then
   IPC=fifo
-else
-  exit 1
 fi
 TYPE="image/png"
 IS_READ=0
@@ -420,22 +419,79 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 ((IS_READ)) || exit 0
-ID="$$.$RANDOM"
+
+# FIFO/queue IPC path (host has a clipboard tool)
+if [[ -n "$IPC" ]]; then
+  ID="$$.$RANDOM"
+  if ((LIST)) || [[ "$TYPE" == "TARGETS" ]]; then
+    REQ="LIST"
+  else
+    REQ="$TYPE"
+  fi
+  if [[ "$IPC" == "queue" ]]; then
+    echo "$REQ" > "/tmp/clipboard_queue/${ID}"
+  else
+    echo "${ID} ${REQ}" > /tmp/clipboard_fifo
+  fi
+  RESP="/tmp/clipboard_resp/${ID}"
+  for _ in $(seq 1 50); do
+    [[ -f "$RESP" ]] && { cat "$RESP"; rm -f "$RESP"; exit 0; }
+    sleep 0.1
+  done
+  exit 1
+fi
+
+# OSC 5522 fallback (Kitty clipboard protocol via terminal)
+[[ -c /dev/tty ]] || exit 1
+ESC=$(printf "\033")
+b64enc() { echo -n "$1" | base64 -w0 2>/dev/null || echo -n "$1" | base64; }
+
+osc_read() {
+  local payload="$1" chunks=""
+  local b64
+  b64=$(b64enc "$payload")
+  local saved
+  saved=$(stty -g < /dev/tty 2>/dev/null) || return 1
+  stty raw -echo < /dev/tty 2>/dev/null
+  printf "\033]5522;type=read;%s\033\\" "$b64" > /dev/tty
+  while true; do
+    local buf="" ch="" prev=""
+    while true; do
+      if ! IFS= read -r -t 2 -n 1 ch < /dev/tty 2>/dev/null; then
+        stty "$saved" < /dev/tty 2>/dev/null
+        return 1
+      fi
+      buf+="$ch"
+      if [[ "$prev" == "$ESC" && "$ch" == "\\" ]]; then
+        break
+      fi
+      prev="$ch"
+      [[ ${#buf} -gt 131072 ]] && break
+    done
+    case "$buf" in
+      *"status=DONE"*) break ;;
+      *"status=DATA"*)
+        local data="${buf##*;}"
+        data="${data%"${ESC}\\"}"
+        chunks+="$data"
+        ;;
+      *"status=OK"*) continue ;;
+      *)
+        stty "$saved" < /dev/tty 2>/dev/null
+        return 1
+        ;;
+    esac
+  done
+  stty "$saved" < /dev/tty 2>/dev/null
+  echo -n "$chunks" | base64 -d 2>/dev/null
+}
+
 if ((LIST)) || [[ "$TYPE" == "TARGETS" ]]; then
-  REQ="LIST"
+  result=$(osc_read ".") || exit 1
+  echo "$result" | tr " " "\n"
 else
-  REQ="$TYPE"
+  osc_read "$TYPE" || exit 1
 fi
-if [[ "$IPC" == "queue" ]]; then
-  echo "$REQ" > "/tmp/clipboard_queue/${ID}"
-else
-  echo "${ID} ${REQ}" > /tmp/clipboard_fifo
-fi
-RESP="/tmp/clipboard_resp/${ID}"
-for _ in $(seq 1 50); do
-  [[ -f "$RESP" ]] && { cat "$RESP"; rm -f "$RESP"; exit 0; }
-  sleep 0.1
-done
 '
 
 read -r -d '' DOCKERFILE <<'DOCKERFILE_EOF' || true
