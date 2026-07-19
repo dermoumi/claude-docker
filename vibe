@@ -619,13 +619,13 @@ if ((IS_MACOS)) && command -v socat &>/dev/null; then
   if [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
     SSH_RELAY_PORT=$(free_port)
     socat "TCP-LISTEN:${SSH_RELAY_PORT},bind=127.0.0.1,reuseaddr,fork" \
-      "UNIX-CONNECT:${SSH_AUTH_SOCK}" &
+      "UNIX-CONNECT:${SSH_AUTH_SOCK}" 2>/dev/null &
     echo "$! ssh-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
   fi
   if [[ -n "${GNUPG_SOCK:-}" && -S "$GNUPG_SOCK" ]]; then
     GPG_RELAY_PORT=$(free_port)
     socat "TCP-LISTEN:${GPG_RELAY_PORT},bind=127.0.0.1,reuseaddr,fork" \
-      "UNIX-CONNECT:${GNUPG_SOCK}" &
+      "UNIX-CONNECT:${GNUPG_SOCK}" 2>/dev/null &
     echo "$! gpg-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
   fi
 fi
