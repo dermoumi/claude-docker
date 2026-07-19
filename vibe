@@ -187,7 +187,7 @@ read -r -d '' DEFAULT_RULES <<'RULES' || true
 - If deviating from the plan, stop and discuss first.
 - Small steps: max ~300 lines per step, one reviewable commit each. Ask before the next.
 - Comments: max 2 lines, only when why isn't obvious; prefer none. No decorative comments, banners, or ASCII art.
-- Never commit unless asked. Suggest a conventional commit command (under 80 chars). One approval ≠ blanket permission.
+- NEVER commit or push unless the user explicitly says "commit". Suggest a conventional commit message instead. One approval ≠ blanket permission.
 - Never push to remote.
 RULES
 
