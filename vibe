@@ -2,7 +2,18 @@
 
 set -e
 
-tolower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
+tolower() {
+  echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+free_port() {
+  python3 -c 'import socket,random
+while True:
+ p=random.randint(20000,60000)
+ s=socket.socket()
+ try: s.bind(("127.0.0.1",p)); s.close(); print(p); break
+ except: s.close()'
+}
 
 IS_MACOS=0
 [[ "$(uname -s)" == "Darwin" ]] && IS_MACOS=1
@@ -279,12 +290,21 @@ CONTAINER_NAME="${PROJECT_NAME}"
 
 ENTRYPOINT_SCRIPT='#!/bin/bash
 
-if [[ -S /tmp/ssh_auth_sock ]]; then
+if [[ -n "${SSH_RELAY_PORT:-}" ]]; then
+  socat UNIX-LISTEN:/tmp/ssh_auth_sock,fork,mode=666 \
+    TCP:host.docker.internal:${SSH_RELAY_PORT} &
+  export SSH_AUTH_SOCK=/tmp/ssh_auth_sock
+elif [[ -S /tmp/ssh_auth_sock ]]; then
   sudo chmod 666 /tmp/ssh_auth_sock
   export SSH_AUTH_SOCK=/tmp/ssh_auth_sock
 fi
 
-if [[ -S /tmp/gnupg_sock ]]; then
+if [[ -n "${GPG_RELAY_PORT:-}" ]]; then
+  GNUPG_SOCK=$(gpgconf --list-dir agent-socket)
+  mkdir -m 700 -p "$(dirname "$GNUPG_SOCK")"
+  socat UNIX-LISTEN:"${GNUPG_SOCK}",fork,mode=600 \
+    TCP:host.docker.internal:${GPG_RELAY_PORT} &
+elif [[ -S /tmp/gnupg_sock ]]; then
   sudo chmod 666 /tmp/gnupg_sock
   gpgconf --kill gpg-agent 2>/dev/null || true
   GNUPG_SOCK=$(gpgconf --list-dir agent-socket)
@@ -589,6 +609,24 @@ if command -v gpgconf &>/dev/null; then
   fi
 fi
 
+# On macOS, VirtioFS socket forwarding is unreliable — use socat TCP relay instead
+SSH_RELAY_PORT=""
+GPG_RELAY_PORT=""
+if ((IS_MACOS)) && command -v socat &>/dev/null; then
+  if [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
+    SSH_RELAY_PORT=$(free_port)
+    socat "TCP-LISTEN:${SSH_RELAY_PORT},bind=127.0.0.1,reuseaddr,fork" \
+      "UNIX-CONNECT:${SSH_AUTH_SOCK}" &
+    echo "$! ssh-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+  fi
+  if [[ -n "${GNUPG_SOCK:-}" && -S "$GNUPG_SOCK" ]]; then
+    GPG_RELAY_PORT=$(free_port)
+    socat "TCP-LISTEN:${GPG_RELAY_PORT},bind=127.0.0.1,reuseaddr,fork" \
+      "UNIX-CONNECT:${GNUPG_SOCK}" &
+    echo "$! gpg-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+  fi
+fi
+
 # Setup gitconfig if it exists
 if [[ -f "$HOME/.gitconfig" ]]; then
   export GITCONFIG="$HOME/.gitconfig"
@@ -672,12 +710,21 @@ if [[ ! -f "$CLAUDE_JSON" ]]; then
   echo '{}' > "$CLAUDE_JSON"
 fi
 
+# On macOS, sockets are relayed via TCP (socat) — don't mount them
+if ((IS_MACOS)); then
+  SOCK_MOUNT_SSH="/dev/null"
+  SOCK_MOUNT_GPG="/dev/null"
+else
+  SOCK_MOUNT_SSH="${SSH_AUTH_SOCK:-/dev/null}"
+  SOCK_MOUNT_GPG="${GNUPG_SOCK:-/dev/null}"
+fi
+
 # Build volumes array
 VOLUMES=(
   -v "$TARGET_DIR:$TARGET_DIR${VOLUME_RO:-}"
   -v /var/run/docker.sock:/var/run/docker.sock
-  -v "${SSH_AUTH_SOCK:-/dev/null}:/tmp/ssh_auth_sock"
-  -v "${GNUPG_SOCK:-/dev/null}:/tmp/gnupg_sock"
+  -v "${SOCK_MOUNT_SSH:-/dev/null}:/tmp/ssh_auth_sock"
+  -v "${SOCK_MOUNT_GPG:-/dev/null}:/tmp/gnupg_sock"
   -v "${GITCONFIG:-/dev/null}:/tmp/host_gitconfig"
   -v "${CLAUDE_JSON}:/tmp/host_claude_json"
   -v "${CLAUDE_HOME}:/home/dev/.claude"
@@ -740,6 +787,8 @@ if ((IS_MACOS)); then
   ((HAS_CODE)) && ENVS+=(-e "VIBE_VSCODE=1")
   [[ -n "$OPEN_CMD" ]] && ENVS+=(-e "VIBE_BROWSER=1")
   [[ -n "$CLIP_CMD" ]] && ENVS+=(-e "VIBE_CLIPBOARD=1")
+  [[ -n "$SSH_RELAY_PORT" ]] && ENVS+=(-e "SSH_RELAY_PORT=${SSH_RELAY_PORT}")
+  [[ -n "$GPG_RELAY_PORT" ]] && ENVS+=(-e "GPG_RELAY_PORT=${GPG_RELAY_PORT}")
 fi
 
 docker run -d --name "$CONTAINER_NAME" \
