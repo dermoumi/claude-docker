@@ -291,6 +291,7 @@ CONTAINER_NAME="${PROJECT_NAME}"
 ENTRYPOINT_SCRIPT='#!/bin/bash
 
 if [[ -n "${SSH_RELAY_PORT:-}" ]]; then
+  rm -f /tmp/ssh_auth_sock
   socat UNIX-LISTEN:/tmp/ssh_auth_sock,fork,mode=666 \
     TCP:host.docker.internal:${SSH_RELAY_PORT} &
   export SSH_AUTH_SOCK=/tmp/ssh_auth_sock
@@ -300,8 +301,10 @@ elif [[ -S /tmp/ssh_auth_sock ]]; then
 fi
 
 if [[ -n "${GPG_RELAY_PORT:-}" ]]; then
+  gpgconf --kill gpg-agent 2>/dev/null || true
   GNUPG_SOCK=$(gpgconf --list-dir agent-socket)
   mkdir -m 700 -p "$(dirname "$GNUPG_SOCK")"
+  rm -f "$GNUPG_SOCK"
   socat UNIX-LISTEN:"${GNUPG_SOCK}",fork,mode=600 \
     TCP:host.docker.internal:${GPG_RELAY_PORT} &
 elif [[ -S /tmp/gnupg_sock ]]; then
@@ -710,21 +713,10 @@ if [[ ! -f "$CLAUDE_JSON" ]]; then
   echo '{}' > "$CLAUDE_JSON"
 fi
 
-# On macOS, sockets are relayed via TCP (socat) — don't mount them
-if ((IS_MACOS)); then
-  SOCK_MOUNT_SSH="/dev/null"
-  SOCK_MOUNT_GPG="/dev/null"
-else
-  SOCK_MOUNT_SSH="${SSH_AUTH_SOCK:-/dev/null}"
-  SOCK_MOUNT_GPG="${GNUPG_SOCK:-/dev/null}"
-fi
-
 # Build volumes array
 VOLUMES=(
   -v "$TARGET_DIR:$TARGET_DIR${VOLUME_RO:-}"
   -v /var/run/docker.sock:/var/run/docker.sock
-  -v "${SOCK_MOUNT_SSH:-/dev/null}:/tmp/ssh_auth_sock"
-  -v "${SOCK_MOUNT_GPG:-/dev/null}:/tmp/gnupg_sock"
   -v "${GITCONFIG:-/dev/null}:/tmp/host_gitconfig"
   -v "${CLAUDE_JSON}:/tmp/host_claude_json"
   -v "${CLAUDE_HOME}:/home/dev/.claude"
@@ -735,6 +727,8 @@ VOLUMES=(
 )
 if ! ((IS_MACOS)); then
   VOLUMES+=(
+    -v "${SSH_AUTH_SOCK:-/dev/null}:/tmp/ssh_auth_sock"
+    -v "${GNUPG_SOCK:-/dev/null}:/tmp/gnupg_sock"
     -v "${VSCODE_FIFO:-/dev/null}:/tmp/vscode_fifo"
     -v "${VSCODE_FIFO_RESP:-/dev/null}:/tmp/vscode_fifo_resp"
     -v "${BROWSER_FIFO:-/dev/null}:/tmp/browser_fifo"
