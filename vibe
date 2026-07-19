@@ -280,7 +280,6 @@ CONTAINER_NAME="${PROJECT_NAME}"
 ENTRYPOINT_SCRIPT='#!/bin/bash
 
 if [[ -S /tmp/ssh_auth_sock ]]; then
-  sudo chmod 666 /tmp/ssh_auth_sock
   export SSH_AUTH_SOCK=/tmp/ssh_auth_sock
 fi
 
@@ -589,13 +588,6 @@ if command -v gpgconf &>/dev/null; then
   fi
 fi
 
-# SSH agent socket: Docker Desktop on macOS can't mount host sockets directly
-if ((IS_MACOS)); then
-  SSH_AUTH_SOCK_MOUNT="/run/host-services/ssh-auth.sock"
-else
-  SSH_AUTH_SOCK_MOUNT="${SSH_AUTH_SOCK:-/dev/null}"
-fi
-
 # Setup gitconfig if it exists
 if [[ -f "$HOME/.gitconfig" ]]; then
   export GITCONFIG="$HOME/.gitconfig"
@@ -683,7 +675,7 @@ fi
 VOLUMES=(
   -v "$TARGET_DIR:$TARGET_DIR${VOLUME_RO:-}"
   -v /var/run/docker.sock:/var/run/docker.sock
-  -v "${SSH_AUTH_SOCK_MOUNT:-/dev/null}:/tmp/ssh_auth_sock"
+  -v "${SSH_AUTH_SOCK:-/dev/null}:/tmp/ssh_auth_sock"
   -v "${GNUPG_SOCK:-/dev/null}:/tmp/gnupg_sock"
   -v "${GITCONFIG:-/dev/null}:/tmp/host_gitconfig"
   -v "${CLAUDE_JSON}:/tmp/host_claude_json"
