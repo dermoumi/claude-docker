@@ -787,6 +787,7 @@ fi
 
 docker run -d --name "$CONTAINER_NAME" \
   --network bridge \
+  --add-host=host.docker.internal:host-gateway \
   "${ENVS[@]}" \
   "${VOLUMES[@]}" \
   "$IMAGE_NAME" bash -c "sleep infinity" >/dev/null
