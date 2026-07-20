@@ -367,7 +367,7 @@ node -e "
 " 2>/dev/null || true
 
 if [[ -n "${WORKDIR:-}" ]]; then
-  sudo mkdir -p "$WORKDIR" && sudo chown $(id -u):$(id -g) "$WORKDIR"
+  sudo mkdir -p "$WORKDIR" && sudo chown $(id -u):$(id -g) "$WORKDIR" 2>/dev/null || true
   cd "$WORKDIR"
 fi
 
