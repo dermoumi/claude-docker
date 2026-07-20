@@ -726,15 +726,21 @@ VOLUMES=(
   -v "$GRAPHIFY_DIR:$GRAPHIFY_MOUNT"
 )
 if ! ((IS_MACOS)); then
-  VOLUMES+=(
-    -v "${SSH_AUTH_SOCK:-/dev/null}:/tmp/ssh_auth_sock"
-    -v "${GNUPG_SOCK:-/dev/null}:/tmp/gnupg_sock"
-    -v "${VSCODE_FIFO:-/dev/null}:/tmp/vscode_fifo"
-    -v "${VSCODE_FIFO_RESP:-/dev/null}:/tmp/vscode_fifo_resp"
-    -v "${BROWSER_FIFO:-/dev/null}:/tmp/browser_fifo"
-    -v "${CLIPBOARD_FIFO:-/dev/null}:/tmp/clipboard_fifo"
-    -v "${CLIPBOARD_RESP_DIR:-/dev/null}:/tmp/clipboard_resp"
-  )
+  # Docker won't follow a symlinked mount source: it sees the link, decides the
+  # source is missing, then fails to mkdir it. Resolve and skip what's absent.
+  add_host_mount() {
+    local src="$1" dest="$2" real
+    [[ -e "$src" ]] || return 0
+    real=$(readlink -f "$src") || return 0
+    VOLUMES+=(-v "$real:$dest")
+  }
+  add_host_mount "${SSH_AUTH_SOCK:-}" /tmp/ssh_auth_sock
+  add_host_mount "${GNUPG_SOCK:-}" /tmp/gnupg_sock
+  add_host_mount "${VSCODE_FIFO:-}" /tmp/vscode_fifo
+  add_host_mount "${VSCODE_FIFO_RESP:-}" /tmp/vscode_fifo_resp
+  add_host_mount "${BROWSER_FIFO:-}" /tmp/browser_fifo
+  add_host_mount "${CLIPBOARD_FIFO:-}" /tmp/clipboard_fifo
+  add_host_mount "${CLIPBOARD_RESP_DIR:-}" /tmp/clipboard_resp
 fi
 if [[ -n "$WORKTREE" ]]; then
   VOLUMES+=(-v "$TARGET_DIR/.git:$TARGET_DIR/.git")
