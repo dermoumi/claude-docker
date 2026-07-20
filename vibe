@@ -224,17 +224,6 @@ Save project context in .claude/ (PLAN.md, PROGRESS.md at root; MEMORY.md and pe
 ENV
 inject_section "## Environment (maintained by the vibe utility)" "$ENV_CONTENT"
 
-# Ensure graphify-out/ exists and mount it
-if [[ -n "$WORKTREE" ]]; then
-  GRAPHIFY_DIR="$(git rev-parse --show-toplevel)/graphify-out"
-else
-  GRAPHIFY_DIR="${TARGET_DIR}/graphify-out"
-fi
-mkdir -p "$GRAPHIFY_DIR"
-if [[ ! -f "$GRAPHIFY_DIR/.gitignore" ]]; then
-  echo '*' > "$GRAPHIFY_DIR/.gitignore"
-fi
-export GRAPHIFY_DIR
 
 # Sanitize a string to only contain alphanumeric characters and hyphens
 sanitize() { echo "$1" | tr -cd "a-zA-Z0-9-"; }
@@ -275,12 +264,6 @@ else
   export VIBE_MOUNT="${TARGET_DIR}/.claude"
 fi
 
-# Mount graphify-out inside the worktree CWD
-if [[ -n "${WORKTREE_REL:-}" ]]; then
-  export GRAPHIFY_MOUNT="${TARGET_DIR}/${WORKTREE_REL}/graphify-out"
-else
-  export GRAPHIFY_MOUNT="${TARGET_DIR}/graphify-out"
-fi
 
 GID=$(id -g)
 export GID
@@ -376,10 +359,6 @@ if [[ -n "${ON_BUILD:-}" && ! -f /tmp/.on_build_done ]]; then
   touch /tmp/.on_build_done
 fi
 
-if [[ ! -f /tmp/.graphify_installed ]]; then
-  graphify install &>/dev/null || true
-  touch /tmp/.graphify_installed
-fi
 
 exec "$@"
 '
@@ -548,7 +527,6 @@ RUN mkdir -p \
 RUN curl -fsSL https://claude.ai/install.sh | bash \
   && curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/home/$USER/.local/bin:$PATH"
-RUN uv tool install graphifyy
 
 ARG CODE_WRAPPER
 RUN echo "$CODE_WRAPPER" > /home/$USER/.local/bin/code \
@@ -723,7 +701,6 @@ VOLUMES=(
   -v "${CLAUDE_PROJECTS}:/home/dev/.claude/projects"
   -v "${CLAUDE_STATE}:/home/dev/.local/state/claude"
   -v "$VIBE_DIR:$VIBE_MOUNT"
-  -v "$GRAPHIFY_DIR:$GRAPHIFY_MOUNT"
 )
 if ! ((IS_MACOS)); then
   # Docker won't follow a symlinked mount source: it sees the link, decides the
