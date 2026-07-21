@@ -424,78 +424,25 @@ while [[ $# -gt 0 ]]; do
 done
 ((IS_READ)) || exit 0
 
-# FIFO/queue IPC path (host has a clipboard tool)
-if [[ -n "$IPC" ]]; then
-  ID="$$.$RANDOM"
-  if ((LIST)) || [[ "$TYPE" == "TARGETS" ]]; then
-    REQ="LIST"
-  else
-    REQ="$TYPE"
-  fi
-  if [[ "$IPC" == "queue" ]]; then
-    echo "$REQ" > "/tmp/clipboard_queue/${ID}"
-  else
-    echo "${ID} ${REQ}" > /tmp/clipboard_fifo
-  fi
-  RESP="/tmp/clipboard_resp/${ID}"
-  for _ in $(seq 1 50); do
-    [[ -f "$RESP" ]] && { cat "$RESP"; rm -f "$RESP"; exit 0; }
-    sleep 0.1
-  done
-  exit 1
-fi
+[[ -n "$IPC" ]] || exit 1
 
-# OSC 5522 fallback (Kitty clipboard protocol via terminal)
-[[ -c /dev/tty ]] || exit 1
-ESC=$(printf "\033")
-b64enc() { echo -n "$1" | base64 -w0 2>/dev/null || echo -n "$1" | base64; }
-
-osc_read() {
-  local payload="$1" chunks=""
-  local b64
-  b64=$(b64enc "$payload")
-  local saved
-  saved=$(stty -g < /dev/tty 2>/dev/null) || return 1
-  stty raw -echo < /dev/tty 2>/dev/null
-  printf "\033]5522;type=read;%s\033\\" "$b64" > /dev/tty
-  while true; do
-    local buf="" ch="" prev=""
-    while true; do
-      if ! IFS= read -r -t 2 -n 1 ch < /dev/tty 2>/dev/null; then
-        stty "$saved" < /dev/tty 2>/dev/null
-        return 1
-      fi
-      buf+="$ch"
-      if [[ "$prev" == "$ESC" && "$ch" == "\\" ]]; then
-        break
-      fi
-      prev="$ch"
-      [[ ${#buf} -gt 131072 ]] && break
-    done
-    case "$buf" in
-      *"status=DONE"*) break ;;
-      *"status=DATA"*)
-        local data="${buf##*;}"
-        data="${data%"${ESC}\\"}"
-        chunks+="$data"
-        ;;
-      *"status=OK"*) continue ;;
-      *)
-        stty "$saved" < /dev/tty 2>/dev/null
-        return 1
-        ;;
-    esac
-  done
-  stty "$saved" < /dev/tty 2>/dev/null
-  echo -n "$chunks" | base64 -d 2>/dev/null
-}
-
+ID="$$.$RANDOM"
 if ((LIST)) || [[ "$TYPE" == "TARGETS" ]]; then
-  result=$(osc_read ".") || exit 1
-  echo "$result" | tr " " "\n"
+  REQ="LIST"
 else
-  osc_read "$TYPE" || exit 1
+  REQ="$TYPE"
 fi
+if [[ "$IPC" == "queue" ]]; then
+  echo "$REQ" > "/tmp/clipboard_queue/${ID}"
+else
+  echo "${ID} ${REQ}" > /tmp/clipboard_fifo
+fi
+RESP="/tmp/clipboard_resp/${ID}"
+for _ in $(seq 1 50); do
+  [[ -f "$RESP" ]] && { cat "$RESP"; rm -f "$RESP"; exit 0; }
+  sleep 0.1
+done
+exit 1
 '
 
 read -r -d '' DOCKERFILE <<'DOCKERFILE_EOF' || true
