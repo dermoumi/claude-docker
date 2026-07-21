@@ -528,22 +528,24 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
   && curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/home/$USER/.local/bin:$PATH"
 
+# printf, not echo: RUN uses dash, whose echo eats backslash escapes and
+# corrupts any wrapper containing them.
 ARG CODE_WRAPPER
-RUN echo "$CODE_WRAPPER" > /home/$USER/.local/bin/code \
+RUN printf '%s\n' "$CODE_WRAPPER" > /home/$USER/.local/bin/code \
   && chmod +x /home/$USER/.local/bin/code
 
 ARG BROWSER_WRAPPER
-RUN echo "$BROWSER_WRAPPER" > /home/$USER/.local/bin/xdg-open \
+RUN printf '%s\n' "$BROWSER_WRAPPER" > /home/$USER/.local/bin/xdg-open \
   && chmod +x /home/$USER/.local/bin/xdg-open
 
 ARG CLIPBOARD_WRAPPER
-RUN echo "$CLIPBOARD_WRAPPER" > /home/$USER/.local/bin/xclip \
+RUN printf '%s\n' "$CLIPBOARD_WRAPPER" > /home/$USER/.local/bin/xclip \
   && chmod +x /home/$USER/.local/bin/xclip \
   && ln -s xclip /home/$USER/.local/bin/xsel \
   && ln -s xclip /home/$USER/.local/bin/wl-paste
 
 ARG ENTRYPOINT
-RUN echo "$ENTRYPOINT" | sudo tee /entrypoint.sh > /dev/null \
+RUN printf '%s\n' "$ENTRYPOINT" | sudo tee /entrypoint.sh > /dev/null \
   && sudo chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 
