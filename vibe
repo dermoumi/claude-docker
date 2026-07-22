@@ -540,7 +540,7 @@ if command -v gpgconf &>/dev/null; then
   GNUPG_SOCK=$(gpgconf --list-dir agent-extra-socket)
   if [[ -S "$GNUPG_SOCK" ]]; then
     export GNUPG_SOCK
-    GPG_PUBKEYS=$(gpg --export -a $(gpg --list-secret-keys --with-colons | awk -F: '/^sec/{print $5}'))
+    GPG_PUBKEYS=$(gpg --export -a $(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '/^sec/{print $5}') 2>/dev/null)
     export GPG_PUBKEYS
   fi
 fi
