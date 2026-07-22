@@ -930,6 +930,7 @@ ENVS=(
   -e "GPG_PUBKEYS=${GPG_PUBKEYS:-}"
   -e "WORKDIR=${WORKDIR}"
   -e "ON_BUILD=${ON_BUILD:-}"
+  -e COLORTERM
 )
 if ((IS_MACOS)); then
   ((HAS_CODE)) && ENVS+=(-e "VIBE_VSCODE=1")
