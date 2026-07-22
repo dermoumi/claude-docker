@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-#
-# devbox — run instead of `ssht devbox`. Backgrounds a local clipboard service,
-# forwards it into the remote session over `ssh -R`, and tears it down on exit,
-# so the container's clipboard shim can reach THIS machine's clipboard for
-# Ctrl+V image paste. No ~/.ssh/config changes.
-#
-# Requires: socat, and a clipboard tool (wl-paste / xclip / pbpaste).
-# REMOTE_SOCK must match the path `vibe` bind-mounts into the container.
+# Run instead of `ssht devbox`: serve this machine's clipboard over a unix socket
+# forwarded into the remote container, so Ctrl+V image paste works there.
 
 LOCAL_SOCK="${HOME}/.vibe/clip.sock"
 REMOTE_SOCK="/tmp/vibe-clip.sock"
@@ -18,8 +12,7 @@ detect_clip() {
   fi
 }
 
-# macOS: pull PNG bytes from the pasteboard to stdout (public.png, or re-encode
-# public.tiff). Stateless — each socat connection is a fresh process.
+# Stateless: each socat connection is a fresh process, so render PNG on demand.
 serve_pbpaste_png() {
   local tmp
   tmp="$(mktemp)"
@@ -91,6 +84,6 @@ socat "UNIX-LISTEN:${LOCAL_SOCK},fork,mode=600" "EXEC:$(realpath "$0") --serve" 
 SERVE_PID=$!
 trap 'kill "$SERVE_PID" 2>/dev/null; rm -f "$LOCAL_SOCK"' EXIT
 
-# ssht --flag devbox == ssh --flag devbox <tmux-command>; flags precede the host.
-# The shell expands both paths, so ssh sees absolute sockets on each side.
-ssht -o StreamLocalBindUnlink=yes -R "${REMOTE_SOCK}:${LOCAL_SOCK}" "$@" devbox
+# kitten ssh (via ssht) shares connections, and a reused master drops new -R
+# forwards; ControlPath=none forces a private connection so the socket binds.
+ssht -o ControlPath=none -R "${REMOTE_SOCK}:${LOCAL_SOCK}" "$@" devbox
