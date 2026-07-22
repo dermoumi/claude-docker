@@ -409,6 +409,8 @@ if [[ -d /tmp/clipboard_queue ]]; then
   IPC=queue
 elif [[ -p /tmp/clipboard_fifo ]]; then
   IPC=fifo
+elif [[ -S /tmp/clip.sock ]]; then
+  IPC=socket
 fi
 TYPE="image/png"
 IS_READ=0
@@ -431,6 +433,10 @@ if ((LIST)) || [[ "$TYPE" == "TARGETS" ]]; then
   REQ="LIST"
 else
   REQ="$TYPE"
+fi
+if [[ "$IPC" == "socket" ]]; then
+  printf "%s\n" "$REQ" | socat - UNIX-CONNECT:/tmp/clip.sock 2>/dev/null
+  exit $?
 fi
 if [[ "$IPC" == "queue" ]]; then
   echo "$REQ" > "/tmp/clipboard_queue/${ID}"
@@ -667,6 +673,9 @@ if ! ((IS_MACOS)); then
   add_host_mount "${BROWSER_FIFO:-}" /tmp/browser_fifo
   add_host_mount "${CLIPBOARD_FIFO:-}" /tmp/clipboard_fifo
   add_host_mount "${CLIPBOARD_RESP_DIR:-}" /tmp/clipboard_resp
+  # Clipboard socket forwarded from a client by the `devbox` launcher (ssh -R).
+  # Auto-skipped when absent, i.e. for local (non-remote) vibe sessions.
+  add_host_mount /tmp/vibe-clip.sock /tmp/clip.sock
 fi
 if [[ -n "$WORKTREE" ]]; then
   VOLUMES+=(-v "$TARGET_DIR/.git:$TARGET_DIR/.git")

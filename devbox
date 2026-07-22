@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+#
+# devbox — run instead of `ssht devbox`. Backgrounds a local clipboard service,
+# forwards it into the remote session over `ssh -R`, and tears it down on exit,
+# so the container's clipboard shim can reach THIS machine's clipboard for
+# Ctrl+V image paste. No ~/.ssh/config changes.
+#
+# Requires: socat, and a clipboard tool (wl-paste / xclip / pbpaste).
+# REMOTE_SOCK must match the path `vibe` bind-mounts into the container.
+
+LOCAL_SOCK="${HOME}/.vibe/clip.sock"
+REMOTE_SOCK="/tmp/vibe-clip.sock"
+
+detect_clip() {
+  if command -v wl-paste &>/dev/null; then echo wl-paste
+  elif command -v xclip &>/dev/null; then echo xclip
+  elif command -v pbpaste &>/dev/null; then echo pbpaste
+  fi
+}
+
+# macOS: pull PNG bytes from the pasteboard to stdout (public.png, or re-encode
+# public.tiff). Stateless — each socat connection is a fresh process.
+serve_pbpaste_png() {
+  local tmp
+  tmp="$(mktemp)"
+  osascript -l JavaScript -e '
+    ObjC.import("AppKit");
+    ObjC.import("Foundation");
+    var pb = $.NSPasteboard.generalPasteboard;
+    var data = pb.dataForType("public.png");
+    if (!data || data.isNil()) {
+      var tiffData = pb.dataForType("public.tiff");
+      if (tiffData && !tiffData.isNil()) {
+        var rep = $.NSBitmapImageRep.imageRepWithData(tiffData);
+        if (rep && !rep.isNil()) {
+          data = rep.representationUsingTypeProperties(4, $.NSDictionary.dictionary);
+        }
+      }
+    }
+    if (data && !data.isNil()) {
+      data.writeToFileAtomically("'"$tmp"'", true);
+    }
+  ' &>/dev/null
+  [[ -s "$tmp" ]] && cat "$tmp"
+  rm -f "$tmp"
+}
+
+# One request line on stdin ("LIST" or a mime type), raw bytes on stdout.
+serve() {
+  local req clip
+  IFS= read -r req || return 0
+  clip="$(detect_clip)"
+  [[ -n "$clip" ]] || return 0
+  if [[ "$req" == "LIST" ]]; then
+    case "$clip" in
+      pbpaste)
+        local info types=""
+        info=$(osascript -e 'clipboard info' 2>/dev/null) || info=""
+        [[ "$info" == *"«class PNGf»"* || "$info" == *"«class TIFF»"* ]] && types="image/png"
+        [[ "$info" == *"«class utf8»"* ]] && types="${types:+$types
+}text/plain"
+        echo "${types:-text/plain}"
+        ;;
+      wl-paste) wl-paste -l 2>/dev/null ;;
+      xclip)    xclip -selection clipboard -t TARGETS -o 2>/dev/null ;;
+    esac
+  else
+    case "$clip" in
+      pbpaste)
+        if [[ "$req" == "image/png" ]]; then serve_pbpaste_png
+        else pbpaste 2>/dev/null; fi
+        ;;
+      wl-paste) wl-paste --type "$req" 2>/dev/null ;;
+      xclip)    xclip -selection clipboard -t "$req" -o 2>/dev/null ;;
+    esac
+  fi
+}
+
+if [[ "${1:-}" == "--serve" ]]; then
+  serve
+  exit 0
+fi
+
+command -v socat &>/dev/null || { echo "devbox: socat is required" >&2; exit 1; }
+[[ -n "$(detect_clip)" ]] || \
+  echo "devbox: no clipboard tool (wl-paste/xclip/pbpaste); paste will be unavailable" >&2
+
+mkdir -p "$(dirname "$LOCAL_SOCK")"
+rm -f "$LOCAL_SOCK"
+socat "UNIX-LISTEN:${LOCAL_SOCK},fork,mode=600" "EXEC:$(realpath "$0") --serve" &
+SERVE_PID=$!
+trap 'kill "$SERVE_PID" 2>/dev/null; rm -f "$LOCAL_SOCK"' EXIT
+
+# ssht --flag devbox == ssh --flag devbox <tmux-command>; flags precede the host.
+# The shell expands both paths, so ssh sees absolute sockets on each side.
+ssht -o StreamLocalBindUnlink=yes -R "${REMOTE_SOCK}:${LOCAL_SOCK}" "$@" devbox
