@@ -50,8 +50,7 @@ serve() {
         local info types=""
         info=$(osascript -e 'clipboard info' 2>/dev/null) || info=""
         [[ "$info" == *"«class PNGf»"* || "$info" == *"«class TIFF»"* ]] && types="image/png"
-        [[ "$info" == *"«class utf8»"* ]] && types="${types:+$types
-}text/plain"
+        [[ "$info" == *"«class utf8»"* ]] && types="${types:+$types$'\n'}text/plain"
         echo "${types:-text/plain}"
         ;;
       wl-paste) wl-paste -l 2>/dev/null ;;
