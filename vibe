@@ -29,6 +29,7 @@ NO_CACHE=0
 GITIGNORE_ON=0
 GITIGNORE_OFF=0
 QUERY=0
+ISOLATED=0
 QUERY_PROMPT=""
 PARENT_DIR=""
 
@@ -47,13 +48,15 @@ Flags:
   -N    Build with no cache (implies -B)
   -P    Mount parent directory read-only for sibling repo access
   -q P  Query one-off: run prompt P non-interactively, print result to stdout
+  -Q P  Like -q but isolated: only login credentials mounted, no sockets, and a
+        throwaway container so it can run alongside an existing one
   -v    Open VS Code attached to the container
 EOF
   exit 0
 }
 
 # Parse flags
-while getopts "BdDgGhkNP:q:v" opt; do
+while getopts "BdDgGhkNP:Q:q:v" opt; do
   case $opt in
     B) BUILD=1;;
     d) DOWN=1;;
@@ -65,11 +68,277 @@ while getopts "BdDgGhkNP:q:v" opt; do
     N) NO_CACHE=1; BUILD=1;;
     P) PARENT_DIR="$(realpath -- "$OPTARG")";;
     q) QUERY=1; QUERY_PROMPT="$OPTARG";;
+    Q) ISOLATED=1; QUERY_PROMPT="$OPTARG";;
     v) VSCODE=1;;
     *) usage;;
   esac
 done
 shift $((OPTIND - 1))
+
+# Image build definitions, hoisted so an isolated query (-Q) can build the
+# base image before any project or socket setup runs below.
+IMAGE_NAME="vibe-base"
+ENTRYPOINT_SCRIPT='#!/bin/bash
+
+if [[ -n "${SSH_RELAY_PORT:-}" ]]; then
+  rm -f /tmp/ssh_auth_sock
+  socat UNIX-LISTEN:/tmp/ssh_auth_sock,fork,mode=666 \
+    TCP:host.docker.internal:${SSH_RELAY_PORT} &
+  export SSH_AUTH_SOCK=/tmp/ssh_auth_sock
+elif [[ -S /tmp/ssh_auth_sock ]]; then
+  sudo chmod 666 /tmp/ssh_auth_sock
+  export SSH_AUTH_SOCK=/tmp/ssh_auth_sock
+fi
+
+if [[ -n "${GPG_RELAY_PORT:-}" ]]; then
+  gpgconf --kill gpg-agent 2>/dev/null || true
+  GNUPG_SOCK=$(gpgconf --list-dir agent-socket)
+  mkdir -m 700 -p "$(dirname "$GNUPG_SOCK")"
+  rm -f "$GNUPG_SOCK"
+  socat UNIX-LISTEN:"${GNUPG_SOCK}",fork,mode=600 \
+    TCP:host.docker.internal:${GPG_RELAY_PORT} &
+elif [[ -S /tmp/gnupg_sock ]]; then
+  sudo chmod 666 /tmp/gnupg_sock
+  gpgconf --kill gpg-agent 2>/dev/null || true
+  GNUPG_SOCK=$(gpgconf --list-dir agent-socket)
+  mkdir -m 700 -p "$(dirname "$GNUPG_SOCK")"
+  ln -sf /tmp/gnupg_sock "$GNUPG_SOCK"
+fi
+
+if [[ -n "${GPG_PUBKEYS:-}" && ! -f /tmp/.gpg_keys_imported ]]; then
+  gpgconf --kill keyboxd 2>/dev/null || true
+  echo "$GPG_PUBKEYS" | gpg --batch --no-autostart --import 2>/dev/null || true
+  gpg --batch --no-autostart --list-keys --with-colons 2>/dev/null \
+    | awk -F: '"'"'/^fpr:/{print $10":6:"}'"'"' \
+    | gpg --batch --no-autostart --import-ownertrust 2>/dev/null || true
+  gpgconf --kill keyboxd 2>/dev/null || true
+  touch /tmp/.gpg_keys_imported
+fi
+
+if [[ -f /tmp/host_gitconfig ]]; then
+  ln -sf /tmp/host_gitconfig "$HOME/.gitconfig"
+fi
+
+if [[ -f /tmp/host_claude_json ]]; then
+  ln -sf /tmp/host_claude_json "$HOME/.claude.json"
+else
+  if [[ ! -f "$HOME/.claude/claude.json" ]]; then
+    echo '"'"'{}'"'"' > "$HOME/.claude/claude.json"
+  fi
+  ln -sf "$HOME/.claude/claude.json" "$HOME/.claude.json"
+fi
+
+if [[ "${VIBE_VSCODE:-}" == "1" ]]; then
+  mkdir -p /tmp/vscode_queue /tmp/vscode_resp
+fi
+if [[ "${VIBE_BROWSER:-}" == "1" ]]; then
+  mkdir -p /tmp/browser_queue
+fi
+if [[ "${VIBE_CLIPBOARD:-}" == "1" ]]; then
+  mkdir -p /tmp/clipboard_queue /tmp/clipboard_resp
+fi
+
+if [[ -p /tmp/vscode_fifo ]] || [[ -d /tmp/vscode_queue ]]; then
+  export EDITOR="code -w"
+fi
+
+if [[ -p /tmp/browser_fifo ]] || [[ -d /tmp/browser_queue ]]; then
+  export BROWSER="xdg-open"
+fi
+
+node -e "
+  var fs = require('"'"'fs'"'"'), f = process.env.HOME + '"'"'/.claude.json'"'"';
+  var d = JSON.parse(fs.readFileSync(f, '"'"'utf8'"'"'));
+  var p = d.projects = d.projects || {}, dir = process.cwd();
+  if (!p[dir] || !p[dir].hasTrustDialogAccepted) {
+    p[dir] = Object.assign(p[dir] || {}, {hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true});
+    fs.writeFileSync(f, JSON.stringify(d, null, 2));
+  }
+" 2>/dev/null || true
+
+if [[ -n "${WORKDIR:-}" ]]; then
+  sudo mkdir -p "$WORKDIR" && sudo chown $(id -u):$(id -g) "$WORKDIR" 2>/dev/null || true
+  cd "$WORKDIR"
+fi
+
+if [[ -n "${ON_BUILD:-}" && ! -f /tmp/.on_build_done ]]; then
+  eval "$ON_BUILD"
+  touch /tmp/.on_build_done
+fi
+
+
+exec "$@"
+'
+
+CODE_WRAPPER='#!/bin/bash
+ARGS=()
+WAIT=0
+for arg in "$@"; do
+  if [[ "$arg" == "-w" || "$arg" == "--wait" ]]; then
+    WAIT=1
+    ARGS+=("$arg")
+  elif [[ "$arg" == -* ]]; then
+    ARGS+=("$arg")
+  else
+    ARGS+=("$(realpath "$arg")")
+  fi
+done
+if [[ -d /tmp/vscode_queue ]]; then
+  ID="$$.$RANDOM"
+  printf '"'"'%s\0'"'"' "${ARGS[@]}" > "/tmp/vscode_queue/${ID}"
+  if [[ "$WAIT" -eq 1 ]]; then
+    for _ in $(seq 1 300); do
+      [[ -f "/tmp/vscode_resp/${ID}" ]] && { rm -f "/tmp/vscode_resp/${ID}"; exit 0; }
+      sleep 0.1
+    done
+  fi
+elif [[ -p /tmp/vscode_fifo ]]; then
+  printf '"'"'%s\0'"'"' "${ARGS[@]}" > /tmp/vscode_fifo
+  if [[ "$WAIT" -eq 1 ]]; then
+    read -r < /tmp/vscode_fifo_resp
+  fi
+fi
+'
+
+BROWSER_WRAPPER='#!/bin/bash
+for arg in "$@"; do
+  if [[ -d /tmp/browser_queue ]]; then
+    echo "$arg" > "/tmp/browser_queue/$$.$RANDOM"
+  elif [[ -p /tmp/browser_fifo ]]; then
+    echo "$arg" > /tmp/browser_fifo
+  fi
+done
+'
+
+CLIPBOARD_WRAPPER='#!/bin/bash
+IPC=""
+if [[ -d /tmp/clipboard_queue ]]; then
+  IPC=queue
+elif [[ -p /tmp/clipboard_fifo ]]; then
+  IPC=fifo
+elif [[ -S /tmp/clip.sock ]]; then
+  IPC=socket
+fi
+TYPE="image/png"
+IS_READ=0
+LIST=0
+case "$(basename "$0")" in wl-paste) IS_READ=1 ;; esac
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output) IS_READ=1; shift ;;
+    -l|--list-types) LIST=1; IS_READ=1; shift ;;
+    -t|--type) TYPE="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+((IS_READ)) || exit 0
+
+[[ -n "$IPC" ]] || exit 1
+
+ID="$$.$RANDOM"
+if ((LIST)) || [[ "$TYPE" == "TARGETS" ]]; then
+  REQ="LIST"
+else
+  REQ="$TYPE"
+fi
+if [[ "$IPC" == "socket" ]]; then
+  printf "%s\n" "$REQ" | socat - UNIX-CONNECT:/tmp/clip.sock 2>/dev/null
+  exit $?
+fi
+if [[ "$IPC" == "queue" ]]; then
+  echo "$REQ" > "/tmp/clipboard_queue/${ID}"
+else
+  echo "${ID} ${REQ}" > /tmp/clipboard_fifo
+fi
+RESP="/tmp/clipboard_resp/${ID}"
+for _ in $(seq 1 50); do
+  [[ -f "$RESP" ]] && { cat "$RESP"; rm -f "$RESP"; exit 0; }
+  sleep 0.1
+done
+exit 1
+'
+
+read -r -d '' DOCKERFILE <<'DOCKERFILE_EOF' || true
+FROM debian:latest
+
+RUN apt-get update -y \
+  && apt-get upgrade -y \
+  && apt-get install -y --no-install-recommends \
+    curl build-essential git sudo docker.io openssh-client gnupg nodejs npm python3 python3-dev iproute2 socat \
+  && rm -rf /var/lib/apt/lists/*
+
+ENV USER=dev
+ENV GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
+ARG UID=1000
+ARG GID=1000
+RUN groupdel $(getent group $GID | cut -d: -f1) 2>/dev/null || true \
+  && groupadd -g $GID $USER \
+  && useradd -mG sudo -g $USER -s /bin/bash -u $UID $USER \
+  && echo "$USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/$USER
+
+USER $USER
+WORKDIR /tmp
+
+RUN mkdir -p \
+  /home/$USER/.local/bin \
+  /home/$USER/.local/state/claude \
+  /home/$USER/.claude
+
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+  && curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/home/$USER/.local/bin:$PATH"
+
+# printf, not echo: RUN uses dash, whose echo eats backslash escapes and
+# corrupts any wrapper containing them.
+ARG CODE_WRAPPER
+RUN printf '%s\n' "$CODE_WRAPPER" > /home/$USER/.local/bin/code \
+  && chmod +x /home/$USER/.local/bin/code
+
+ARG BROWSER_WRAPPER
+RUN printf '%s\n' "$BROWSER_WRAPPER" > /home/$USER/.local/bin/xdg-open \
+  && chmod +x /home/$USER/.local/bin/xdg-open
+
+ARG CLIPBOARD_WRAPPER
+RUN printf '%s\n' "$CLIPBOARD_WRAPPER" > /home/$USER/.local/bin/xclip \
+  && chmod +x /home/$USER/.local/bin/xclip \
+  && ln -s xclip /home/$USER/.local/bin/xsel \
+  && ln -s xclip /home/$USER/.local/bin/wl-paste
+
+ARG ENTRYPOINT
+RUN printf '%s\n' "$ENTRYPOINT" | sudo tee /entrypoint.sh > /dev/null \
+  && sudo chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+
+CMD ["bash", "-c", "sleep infinity"]
+DOCKERFILE_EOF
+
+build_image() {
+  docker build -t "$IMAGE_NAME" \
+    --build-arg "UID=$(id -u)" \
+    --build-arg "GID=$(id -g)" \
+    --build-arg "ENTRYPOINT=$ENTRYPOINT_SCRIPT" \
+    --build-arg "CODE_WRAPPER=$CODE_WRAPPER" \
+    --build-arg "BROWSER_WRAPPER=$BROWSER_WRAPPER" \
+    --build-arg "CLIPBOARD_WRAPPER=$CLIPBOARD_WRAPPER" \
+    "$@" - <<< "$DOCKERFILE"
+}
+
+# Isolated one-off query: reuse only the login credentials, mount nothing else,
+# and run a throwaway --rm container so it sits alongside any existing vibe
+# container in the same directory. Skips all project/socket setup below.
+if ((ISOLATED)); then
+  if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    build_image >&2
+  fi
+  CLAUDE_HOME="${HOME}/.claude"
+  CLAUDE_JSON="${HOME}/.claude.json"
+  mkdir -p "$CLAUDE_HOME"
+  [[ -f "$CLAUDE_JSON" ]] || echo '{}' > "$CLAUDE_JSON"
+  exec docker run --rm \
+    -v "${CLAUDE_JSON}:/tmp/host_claude_json" \
+    -v "${CLAUDE_HOME}:/home/dev/.claude" \
+    "$IMAGE_NAME" claude -p "$QUERY_PROMPT" --dangerously-skip-permissions < /dev/null
+fi
 
 # Split positional args at -- separator
 WORKTREE=""
@@ -449,242 +718,7 @@ fi
 GID=$(id -g)
 export GID
 
-IMAGE_NAME="vibe-base"
 CONTAINER_NAME="${PROJECT_NAME}"
-
-ENTRYPOINT_SCRIPT='#!/bin/bash
-
-if [[ -n "${SSH_RELAY_PORT:-}" ]]; then
-  rm -f /tmp/ssh_auth_sock
-  socat UNIX-LISTEN:/tmp/ssh_auth_sock,fork,mode=666 \
-    TCP:host.docker.internal:${SSH_RELAY_PORT} &
-  export SSH_AUTH_SOCK=/tmp/ssh_auth_sock
-elif [[ -S /tmp/ssh_auth_sock ]]; then
-  sudo chmod 666 /tmp/ssh_auth_sock
-  export SSH_AUTH_SOCK=/tmp/ssh_auth_sock
-fi
-
-if [[ -n "${GPG_RELAY_PORT:-}" ]]; then
-  gpgconf --kill gpg-agent 2>/dev/null || true
-  GNUPG_SOCK=$(gpgconf --list-dir agent-socket)
-  mkdir -m 700 -p "$(dirname "$GNUPG_SOCK")"
-  rm -f "$GNUPG_SOCK"
-  socat UNIX-LISTEN:"${GNUPG_SOCK}",fork,mode=600 \
-    TCP:host.docker.internal:${GPG_RELAY_PORT} &
-elif [[ -S /tmp/gnupg_sock ]]; then
-  sudo chmod 666 /tmp/gnupg_sock
-  gpgconf --kill gpg-agent 2>/dev/null || true
-  GNUPG_SOCK=$(gpgconf --list-dir agent-socket)
-  mkdir -m 700 -p "$(dirname "$GNUPG_SOCK")"
-  ln -sf /tmp/gnupg_sock "$GNUPG_SOCK"
-fi
-
-if [[ -n "${GPG_PUBKEYS:-}" && ! -f /tmp/.gpg_keys_imported ]]; then
-  gpgconf --kill keyboxd 2>/dev/null || true
-  echo "$GPG_PUBKEYS" | gpg --batch --no-autostart --import 2>/dev/null || true
-  gpg --batch --no-autostart --list-keys --with-colons 2>/dev/null \
-    | awk -F: '"'"'/^fpr:/{print $10":6:"}'"'"' \
-    | gpg --batch --no-autostart --import-ownertrust 2>/dev/null || true
-  gpgconf --kill keyboxd 2>/dev/null || true
-  touch /tmp/.gpg_keys_imported
-fi
-
-if [[ -f /tmp/host_gitconfig ]]; then
-  ln -sf /tmp/host_gitconfig "$HOME/.gitconfig"
-fi
-
-if [[ -f /tmp/host_claude_json ]]; then
-  ln -sf /tmp/host_claude_json "$HOME/.claude.json"
-else
-  if [[ ! -f "$HOME/.claude/claude.json" ]]; then
-    echo '"'"'{}'"'"' > "$HOME/.claude/claude.json"
-  fi
-  ln -sf "$HOME/.claude/claude.json" "$HOME/.claude.json"
-fi
-
-if [[ "${VIBE_VSCODE:-}" == "1" ]]; then
-  mkdir -p /tmp/vscode_queue /tmp/vscode_resp
-fi
-if [[ "${VIBE_BROWSER:-}" == "1" ]]; then
-  mkdir -p /tmp/browser_queue
-fi
-if [[ "${VIBE_CLIPBOARD:-}" == "1" ]]; then
-  mkdir -p /tmp/clipboard_queue /tmp/clipboard_resp
-fi
-
-if [[ -p /tmp/vscode_fifo ]] || [[ -d /tmp/vscode_queue ]]; then
-  export EDITOR="code -w"
-fi
-
-if [[ -p /tmp/browser_fifo ]] || [[ -d /tmp/browser_queue ]]; then
-  export BROWSER="xdg-open"
-fi
-
-node -e "
-  var fs = require('"'"'fs'"'"'), f = process.env.HOME + '"'"'/.claude.json'"'"';
-  var d = JSON.parse(fs.readFileSync(f, '"'"'utf8'"'"'));
-  var p = d.projects = d.projects || {}, dir = process.cwd();
-  if (!p[dir] || !p[dir].hasTrustDialogAccepted) {
-    p[dir] = Object.assign(p[dir] || {}, {hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true});
-    fs.writeFileSync(f, JSON.stringify(d, null, 2));
-  }
-" 2>/dev/null || true
-
-if [[ -n "${WORKDIR:-}" ]]; then
-  sudo mkdir -p "$WORKDIR" && sudo chown $(id -u):$(id -g) "$WORKDIR" 2>/dev/null || true
-  cd "$WORKDIR"
-fi
-
-if [[ -n "${ON_BUILD:-}" && ! -f /tmp/.on_build_done ]]; then
-  eval "$ON_BUILD"
-  touch /tmp/.on_build_done
-fi
-
-
-exec "$@"
-'
-
-CODE_WRAPPER='#!/bin/bash
-ARGS=()
-WAIT=0
-for arg in "$@"; do
-  if [[ "$arg" == "-w" || "$arg" == "--wait" ]]; then
-    WAIT=1
-    ARGS+=("$arg")
-  elif [[ "$arg" == -* ]]; then
-    ARGS+=("$arg")
-  else
-    ARGS+=("$(realpath "$arg")")
-  fi
-done
-if [[ -d /tmp/vscode_queue ]]; then
-  ID="$$.$RANDOM"
-  printf '"'"'%s\0'"'"' "${ARGS[@]}" > "/tmp/vscode_queue/${ID}"
-  if [[ "$WAIT" -eq 1 ]]; then
-    for _ in $(seq 1 300); do
-      [[ -f "/tmp/vscode_resp/${ID}" ]] && { rm -f "/tmp/vscode_resp/${ID}"; exit 0; }
-      sleep 0.1
-    done
-  fi
-elif [[ -p /tmp/vscode_fifo ]]; then
-  printf '"'"'%s\0'"'"' "${ARGS[@]}" > /tmp/vscode_fifo
-  if [[ "$WAIT" -eq 1 ]]; then
-    read -r < /tmp/vscode_fifo_resp
-  fi
-fi
-'
-
-BROWSER_WRAPPER='#!/bin/bash
-for arg in "$@"; do
-  if [[ -d /tmp/browser_queue ]]; then
-    echo "$arg" > "/tmp/browser_queue/$$.$RANDOM"
-  elif [[ -p /tmp/browser_fifo ]]; then
-    echo "$arg" > /tmp/browser_fifo
-  fi
-done
-'
-
-CLIPBOARD_WRAPPER='#!/bin/bash
-IPC=""
-if [[ -d /tmp/clipboard_queue ]]; then
-  IPC=queue
-elif [[ -p /tmp/clipboard_fifo ]]; then
-  IPC=fifo
-elif [[ -S /tmp/clip.sock ]]; then
-  IPC=socket
-fi
-TYPE="image/png"
-IS_READ=0
-LIST=0
-case "$(basename "$0")" in wl-paste) IS_READ=1 ;; esac
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -o|--output) IS_READ=1; shift ;;
-    -l|--list-types) LIST=1; IS_READ=1; shift ;;
-    -t|--type) TYPE="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-((IS_READ)) || exit 0
-
-[[ -n "$IPC" ]] || exit 1
-
-ID="$$.$RANDOM"
-if ((LIST)) || [[ "$TYPE" == "TARGETS" ]]; then
-  REQ="LIST"
-else
-  REQ="$TYPE"
-fi
-if [[ "$IPC" == "socket" ]]; then
-  printf "%s\n" "$REQ" | socat - UNIX-CONNECT:/tmp/clip.sock 2>/dev/null
-  exit $?
-fi
-if [[ "$IPC" == "queue" ]]; then
-  echo "$REQ" > "/tmp/clipboard_queue/${ID}"
-else
-  echo "${ID} ${REQ}" > /tmp/clipboard_fifo
-fi
-RESP="/tmp/clipboard_resp/${ID}"
-for _ in $(seq 1 50); do
-  [[ -f "$RESP" ]] && { cat "$RESP"; rm -f "$RESP"; exit 0; }
-  sleep 0.1
-done
-exit 1
-'
-
-read -r -d '' DOCKERFILE <<'DOCKERFILE_EOF' || true
-FROM debian:latest
-
-RUN apt-get update -y \
-  && apt-get upgrade -y \
-  && apt-get install -y --no-install-recommends \
-    curl build-essential git sudo docker.io openssh-client gnupg nodejs npm python3 python3-dev iproute2 socat \
-  && rm -rf /var/lib/apt/lists/*
-
-ENV USER=dev
-ENV GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
-ARG UID=1000
-ARG GID=1000
-RUN groupdel $(getent group $GID | cut -d: -f1) 2>/dev/null || true \
-  && groupadd -g $GID $USER \
-  && useradd -mG sudo -g $USER -s /bin/bash -u $UID $USER \
-  && echo "$USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/$USER
-
-USER $USER
-WORKDIR /tmp
-
-RUN mkdir -p \
-  /home/$USER/.local/bin \
-  /home/$USER/.local/state/claude \
-  /home/$USER/.claude
-
-RUN curl -fsSL https://claude.ai/install.sh | bash \
-  && curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/home/$USER/.local/bin:$PATH"
-
-# printf, not echo: RUN uses dash, whose echo eats backslash escapes and
-# corrupts any wrapper containing them.
-ARG CODE_WRAPPER
-RUN printf '%s\n' "$CODE_WRAPPER" > /home/$USER/.local/bin/code \
-  && chmod +x /home/$USER/.local/bin/code
-
-ARG BROWSER_WRAPPER
-RUN printf '%s\n' "$BROWSER_WRAPPER" > /home/$USER/.local/bin/xdg-open \
-  && chmod +x /home/$USER/.local/bin/xdg-open
-
-ARG CLIPBOARD_WRAPPER
-RUN printf '%s\n' "$CLIPBOARD_WRAPPER" > /home/$USER/.local/bin/xclip \
-  && chmod +x /home/$USER/.local/bin/xclip \
-  && ln -s xclip /home/$USER/.local/bin/xsel \
-  && ln -s xclip /home/$USER/.local/bin/wl-paste
-
-ARG ENTRYPOINT
-RUN printf '%s\n' "$ENTRYPOINT" | sudo tee /entrypoint.sh > /dev/null \
-  && sudo chmod +x /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
-
-CMD ["bash", "-c", "sleep infinity"]
-DOCKERFILE_EOF
 
 # In worktree mode, mount parent repo as read-only
 if [[ -n "$WORKTREE" ]]; then
@@ -873,16 +907,6 @@ remove_container() {
 
 remove_container
 
-build_image() {
-  docker build -t "$IMAGE_NAME" \
-    --build-arg "UID=$(id -u)" \
-    --build-arg "GID=$(id -g)" \
-    --build-arg "ENTRYPOINT=$ENTRYPOINT_SCRIPT" \
-    --build-arg "CODE_WRAPPER=$CODE_WRAPPER" \
-    --build-arg "BROWSER_WRAPPER=$BROWSER_WRAPPER" \
-    --build-arg "CLIPBOARD_WRAPPER=$CLIPBOARD_WRAPPER" \
-    "$@" - <<< "$DOCKERFILE"
-}
 
 if ((BUILD)); then
   if ((NO_CACHE)); then
