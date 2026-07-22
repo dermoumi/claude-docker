@@ -226,6 +226,176 @@ Save project context in .claude/: BACKLOG.md and PROGRESS.md in the branch-scope
 ENV
 inject_section "## Environment (maintained by the vibe utility)" "$ENV_CONTENT"
 
+# Enforce the rules that prompts can't reliably enforce, via Claude Code hooks.
+# Scripts are (re)written each run; only their references are merged into
+# .claude/settings.local.json so an existing user config is never clobbered.
+HOOKS_DIR="$VIBE_DIR/vibe-hooks"
+mkdir -p "$HOOKS_DIR"
+
+cat > "$HOOKS_DIR/prompt_gate.py" <<'PY'
+import sys, json, re, os
+SENT = "/tmp/vibe-commit-approved"
+try:
+    prompt = json.load(sys.stdin).get("prompt") or ""
+except Exception:
+    sys.exit(0)
+if re.search(r"\bcommit\b", prompt, re.I):
+    try: open(SENT, "w").close()
+    except Exception: pass
+else:
+    try: os.remove(SENT)
+    except OSError: pass
+sys.exit(0)
+PY
+
+cat > "$HOOKS_DIR/commit_guard.py" <<'PY'
+import sys, json, re, os
+SENT = "/tmp/vibe-commit-approved"
+try:
+    cmd = (json.load(sys.stdin).get("tool_input") or {}).get("command") or ""
+except Exception:
+    sys.exit(0)
+subs, toks, i = [], cmd.split(), 0
+while i < len(toks):
+    if toks[i] == "git" or toks[i].endswith("/git"):
+        j = i + 1
+        while j < len(toks) and toks[j].startswith("-"):
+            j += 1
+        if j < len(toks):
+            subs.append(toks[j])
+        i = j + 1
+        continue
+    i += 1
+if "push" in subs:
+    sys.stderr.write("vibe: pushing to a remote is disabled by policy "
+                     "(Personal Rules: never push). Ask the user to push manually.")
+    sys.exit(2)
+if "commit" in subs:
+    if os.path.exists(SENT):
+        try: os.remove(SENT)
+        except OSError: pass
+        sys.exit(0)
+    sys.stderr.write("vibe: commit blocked — the user's latest message did not ask "
+                     "for a commit (Personal Rules: never commit unless explicitly "
+                     "told). Suggest a conventional-commit message and wait.")
+    sys.exit(2)
+sys.exit(0)
+PY
+
+cat > "$HOOKS_DIR/comment_guard.py" <<'PY'
+import sys, json, os, re
+CODE = {".js", ".jsx", ".ts", ".tsx", ".py", ".go", ".rs", ".c", ".h", ".cc",
+        ".cpp", ".hpp", ".java", ".rb", ".php", ".swift", ".kt", ".scala",
+        ".sh", ".bash", ".zsh", ".pl", ".lua", ".sql", ".vue", ".svelte"}
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+ti = data.get("tool_input") or {}
+path = ti.get("file_path") or ""
+if os.path.splitext(path)[1].lower() not in CODE:
+    sys.exit(0)
+parts = []
+if isinstance(ti.get("new_string"), str): parts.append(ti["new_string"])
+if isinstance(ti.get("content"), str): parts.append(ti["content"])
+for e in ti.get("edits") or []:
+    if isinstance(e, dict) and isinstance(e.get("new_string"), str):
+        parts.append(e["new_string"])
+run = mx = 0
+c_block = False
+lua_close = None  # e.g. "]]" or "]=]" while inside a Lua --[[ ... ]] comment
+for ln in "\n".join(parts).split("\n"):
+    s = ln.strip()
+    is_comment = False
+    if c_block:
+        is_comment = True
+        if "*/" in s: c_block = False
+    elif lua_close is not None:
+        is_comment = True
+        if lua_close in s: lua_close = None
+    elif s.startswith("/*"):
+        is_comment = True
+        if "*/" not in s: c_block = True
+    elif s.startswith("--"):
+        is_comment = True
+        m = re.match(r"--\[(=*)\[", s)
+        if m:
+            close = "]" + "=" * len(m.group(1)) + "]"
+            if close not in s[m.end():]: lua_close = close
+    elif s.startswith(("//", "#")):
+        is_comment = True
+    if is_comment and s:
+        run += 1; mx = max(mx, run)
+    else:
+        run = 0
+if mx > 2:
+    note = (f"vibe reminder: this change wrote a {mx}-line comment block in "
+            f"{os.path.basename(path)}. Personal Rules cap comments at 2 lines. "
+            "If you just added it, trim to <=2 lines or drop it when the code is "
+            "self-explanatory; ignore this if the comment was pre-existing and "
+            "you did not touch it.")
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PostToolUse", "additionalContext": note}}))
+sys.exit(0)
+PY
+
+# Keep local settings and generated hooks out of git unless already fully ignored.
+if ! grep -qxF '*' "$GITIGNORE" 2>/dev/null; then
+  for entry in 'settings.local.json' 'vibe-hooks/'; do
+    grep -qxF "$entry" "$GITIGNORE" 2>/dev/null || echo "$entry" >> "$GITIGNORE"
+  done
+fi
+
+VIBE_DIR="$VIBE_DIR" python3 - <<'PY'
+import json, os, sys
+path = os.path.join(os.environ["VIBE_DIR"], "settings.local.json")
+data = {}
+if os.path.exists(path):
+    try:
+        with open(path) as f:
+            data = json.load(f) or {}
+    except Exception:
+        os.replace(path, path + ".bak")
+        sys.stderr.write("vibe: existing settings.local.json was unparseable; "
+                         "backed up to settings.local.json.bak\n")
+        data = {}
+if not isinstance(data, dict):
+    data = {}
+hooks = data.get("hooks")
+if not isinstance(hooks, dict):
+    hooks = {}
+MARK = "vibe-hooks/"
+def strip(lst):
+    out = []
+    for entry in lst or []:
+        if isinstance(entry, dict) and isinstance(entry.get("hooks"), list):
+            kept = [h for h in entry["hooks"]
+                    if not (isinstance(h, dict) and MARK in (h.get("command") or ""))]
+            if kept:
+                out.append({**entry, "hooks": kept})
+        else:
+            out.append(entry)
+    return out
+def cmd(name):
+    return {"type": "command",
+            "command": f'python3 "$CLAUDE_PROJECT_DIR/.claude/vibe-hooks/{name}"'}
+vibe = {
+    "UserPromptSubmit": [{"hooks": [cmd("prompt_gate.py")]}],
+    "PreToolUse": [
+        {"matcher": "Bash", "hooks": [cmd("commit_guard.py")]},
+    ],
+    "PostToolUse": [
+        {"matcher": "Edit|Write|MultiEdit", "hooks": [cmd("comment_guard.py")]},
+    ],
+}
+for event, entries in vibe.items():
+    hooks[event] = strip(hooks.get(event)) + entries
+data["hooks"] = hooks
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+
 
 # Sanitize a string to only contain alphanumeric characters and hyphens
 sanitize() { echo "$1" | tr -cd "a-zA-Z0-9-"; }
