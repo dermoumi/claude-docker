@@ -82,6 +82,8 @@ elif [[ "${1:-}" == w:* ]]; then
   WORKTREE_BASE="$(git rev-parse --show-toplevel)/.w"
 
   mkdir -p "$WORKTREE_BASE"
+  # Keep worktrees out of the parent repo, same convention as .claude/
+  [[ -f "$WORKTREE_BASE/.gitignore" ]] || echo '*' > "$WORKTREE_BASE/.gitignore"
 
   WORKTREE="${WORKTREE_BASE}/${WORKTREE_BRANCH}"
   if [[ -d "$WORKTREE" ]] && [[ ! -f "$WORKTREE/.git" ]]; then
