@@ -239,7 +239,7 @@ try:
     prompt = json.load(sys.stdin).get("prompt") or ""
 except Exception:
     sys.exit(0)
-if re.search(r"\bcommit\b", prompt, re.I):
+if re.search(r"\bcommit(s|ted|ting)?\b", prompt, re.I):
     try: open(SENT, "w").close()
     except Exception: pass
 else:
@@ -329,13 +329,16 @@ for ln in "\n".join(parts).split("\n"):
     else:
         run = 0
 if mx > 2:
+    base = os.path.basename(path)
     note = (f"vibe reminder: this change wrote a {mx}-line comment block in "
-            f"{os.path.basename(path)}. Personal Rules cap comments at 2 lines. "
+            f"{base}. Personal Rules cap comments at 2 lines. "
             "If you just added it, trim to <=2 lines or drop it when the code is "
             "self-explanatory; ignore this if the comment was pre-existing and "
             "you did not touch it.")
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "PostToolUse", "additionalContext": note}}))
+    print(json.dumps({
+        "systemMessage": f"vibe: {mx}-line comment in {base} (2-line max) — review it",
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse", "additionalContext": note}}))
 sys.exit(0)
 PY
 
