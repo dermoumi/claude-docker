@@ -715,9 +715,17 @@ elif ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
   build_image
 fi
 
+# Effective working directory: the worktree when in worktree mode, else the target.
+# The entrypoint cd's here, so it must match the -w passed to docker exec below.
+if [[ -n "${WORKTREE_REL:-}" ]]; then
+  WORKDIR="${TARGET_DIR}/${WORKTREE_REL}"
+else
+  WORKDIR="${TARGET_DIR}"
+fi
+
 ENVS=(
   -e "GPG_PUBKEYS=${GPG_PUBKEYS:-}"
-  -e "WORKDIR=${TARGET_DIR}"
+  -e "WORKDIR=${WORKDIR}"
   -e "ON_BUILD=${ON_BUILD:-}"
 )
 if ((IS_MACOS)); then
@@ -1015,12 +1023,7 @@ if ((VSCODE)); then
   open_vscode "$TARGET_DIR"
 fi
 
-# Set up exec command
-if [[ -n "${WORKTREE_REL:-}" ]]; then
-  WORKDIR="${TARGET_DIR}/${WORKTREE_REL}"
-else
-  WORKDIR="${TARGET_DIR}"
-fi
+# Set up exec command (WORKDIR computed above, shared with the container env)
 EXEC=(docker exec -it -w "$WORKDIR" "$CONTAINER_NAME")
 
 # Shell into the container if in debug mode
