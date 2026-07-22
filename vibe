@@ -28,6 +28,8 @@ VSCODE=0
 NO_CACHE=0
 GITIGNORE_ON=0
 GITIGNORE_OFF=0
+QUERY=0
+QUERY_PROMPT=""
 PARENT_DIR=""
 
 usage() {
@@ -44,13 +46,14 @@ Flags:
   -k    Keep container running on exit
   -N    Build with no cache (implies -B)
   -P    Mount parent directory read-only for sibling repo access
+  -q P  Query one-off: run prompt P non-interactively, print result to stdout
   -v    Open VS Code attached to the container
 EOF
   exit 0
 }
 
 # Parse flags
-while getopts "BdDgGhkNP:v" opt; do
+while getopts "BdDgGhkNP:q:v" opt; do
   case $opt in
     B) BUILD=1;;
     d) DOWN=1;;
@@ -61,6 +64,7 @@ while getopts "BdDgGhkNP:v" opt; do
     k) KEEP=1;;
     N) NO_CACHE=1; BUILD=1;;
     P) PARENT_DIR="$(realpath -- "$OPTARG")";;
+    q) QUERY=1; QUERY_PROMPT="$OPTARG";;
     v) VSCODE=1;;
     *) usage;;
   esac
@@ -414,7 +418,9 @@ else
   WINDOW_TITLE="v:${DIR_BASENAME}"
 fi
 TMUX_WINDOW=""
-if [[ -n "${TMUX:-}" ]]; then
+if ((QUERY)); then
+  :
+elif [[ -n "${TMUX:-}" ]]; then
   TMUX_WINDOW="$(tmux display-message -p '#{window_id}')"
   tmux rename-window -t "$TMUX_WINDOW" "$WINDOW_TITLE"
 else
@@ -939,13 +945,15 @@ if command -v socat &>/dev/null; then
   PORT_WATCHER_PID=$!
   disown
 elif [[ ! -f "$HOME/.claude-docker/.no-socat-warning" ]]; then
-  echo "Warning: 'socat' is not installed. OAuth login callback won't work."
-  echo "Install it with your package manager (e.g. sudo pacman -S socat)."
-  read -rp "Continue? [Y/n/never] " ans
-  case "$(tolower "$ans")" in
-    n|no) exit 1 ;;
-    never) mkdir -p "$HOME/.claude-docker" && touch "$HOME/.claude-docker/.no-socat-warning" ;;
-  esac
+  echo "Warning: 'socat' is not installed. OAuth login callback won't work." >&2
+  if ! ((QUERY)); then
+    echo "Install it with your package manager (e.g. sudo pacman -S socat)." >&2
+    read -rp "Continue? [Y/n/never] " ans
+    case "$(tolower "$ans")" in
+      n|no) exit 1 ;;
+      never) mkdir -p "$HOME/.claude-docker" && touch "$HOME/.claude-docker/.no-socat-warning" ;;
+    esac
+  fi
 fi
 
 # Helper to open VS Code attached to the container
@@ -1157,7 +1165,9 @@ fi
 
 # Clean up watcher on exit
 cleanup() {
-  if [[ -n "$TMUX_WINDOW" ]]; then
+  if ((QUERY)); then
+    :
+  elif [[ -n "$TMUX_WINDOW" ]]; then
     tmux set-option -w -t "$TMUX_WINDOW" automatic-rename on
   else
     printf '\033]0;\007'
@@ -1196,12 +1206,24 @@ if ((VSCODE)); then
   open_vscode "$TARGET_DIR"
 fi
 
-# Set up exec command (WORKDIR computed above, shared with the container env)
-EXEC=(docker exec -it -w "$WORKDIR" "$CONTAINER_NAME")
+# Set up exec command (WORKDIR computed above, shared with the container env).
+# Query mode drops -it so no TTY bytes leak into piped stdout and claude -p
+# doesn't sit waiting on an open stdin.
+if ((QUERY)); then
+  EXEC=(docker exec -w "$WORKDIR" "$CONTAINER_NAME")
+else
+  EXEC=(docker exec -it -w "$WORKDIR" "$CONTAINER_NAME")
+fi
 
 # Shell into the container if in debug mode
 if ((DEBUG)); then
   "${EXEC[@]}" /entrypoint.sh bash
+  exit 0
+fi
+
+# Query one-off: run the prompt non-interactively and print the result to stdout.
+if ((QUERY)); then
+  "${EXEC[@]}" /entrypoint.sh claude -p "$QUERY_PROMPT" --dangerously-skip-permissions < /dev/null
   exit 0
 fi
 
