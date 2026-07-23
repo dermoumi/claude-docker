@@ -264,7 +264,7 @@ FROM debian:latest
 RUN apt-get update -y \
   && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends \
-    curl build-essential git sudo docker.io openssh-client gnupg nodejs npm python3 python3-dev iproute2 socat \
+    curl build-essential git sudo openssh-client gnupg nodejs npm python3 python3-dev iproute2 socat \
   && rm -rf /var/lib/apt/lists/*
 
 ENV USER=dev
@@ -864,7 +864,6 @@ fi
 # Build volumes array
 VOLUMES=(
   -v "$TARGET_DIR:$TARGET_DIR${VOLUME_RO:-}"
-  -v /var/run/docker.sock:/var/run/docker.sock
   -v "${GITCONFIG:-/dev/null}:/tmp/host_gitconfig"
   -v "${CLAUDE_JSON}:/tmp/host_claude_json"
   -v "${CLAUDE_HOME}:/home/dev/.claude"
