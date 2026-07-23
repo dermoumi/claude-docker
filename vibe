@@ -44,6 +44,7 @@ Flags:
   -G    Force .claude/.gitignore off (remove '*' entry)
   -h    Show this help message
   -k    Keep container running on exit
+  -p    Shorthand for -P .. (mount the parent of the current directory)
   -P    Mount parent directory read-only for sibling repo access
   -q P  Query one-off: run prompt P non-interactively, print result to stdout
   -Q P  Like -q but isolated: only login credentials mounted, no sockets, and a
@@ -54,7 +55,7 @@ EOF
 }
 
 # Parse flags
-while getopts "bBDgGhkP:Q:q:t" opt; do
+while getopts "bBDgGhkpP:Q:q:t" opt; do
   case $opt in
     b) BUILD=1;;
     B) NO_CACHE=1; BUILD=1;;
@@ -63,6 +64,7 @@ while getopts "bBDgGhkP:Q:q:t" opt; do
     G) GITIGNORE_OFF=1;;
     h) usage;;
     k) KEEP=1;;
+    p) PARENT_DIR="$(realpath -- ..)";;
     P) PARENT_DIR="$(realpath -- "$OPTARG")";;
     q) QUERY=1; QUERY_PROMPT="$OPTARG";;
     Q) ISOLATED=1; QUERY_PROMPT="$OPTARG";;
