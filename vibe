@@ -1275,7 +1275,7 @@ if [[ -n "$PARENT_DIR" ]]; then
   SYSTEM_PROMPT+="Sibling repos available read-only at /repos/. Working project: $(realpath --relative-to="$PARENT_DIR" "$TARGET_DIR")."$'\n'
 fi
 
-TOOL_FLAGS=(--dangerously-skip-permissions --permission-mode plan)
+TOOL_FLAGS=(--permission-mode auto --allow-dangerously-skip-permissions)
 if [[ -n "$SYSTEM_PROMPT" ]]; then
   TOOL_FLAGS+=(--append-system-prompt "$SYSTEM_PROMPT")
 fi
