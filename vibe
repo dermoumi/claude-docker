@@ -544,9 +544,9 @@ if "push" in subs:
                      "(Personal Rules: never push). Ask the user to push manually.")
     sys.exit(2)
 if "commit" in subs:
+    # Approval is turn-scoped: prompt_gate clears the sentinel on the next
+    # user message, so one "commit" request authorizes every commit this turn.
     if os.path.exists(SENT):
-        try: os.remove(SENT)
-        except OSError: pass
         sys.exit(0)
     sys.stderr.write("vibe: commit blocked — the user's latest message did not ask "
                      "for a commit (Personal Rules: never commit unless explicitly "
