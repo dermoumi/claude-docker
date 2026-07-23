@@ -24,7 +24,6 @@ BUILD=0
 DOWN=0
 KEEP=0
 TORN_DOWN=0
-VSCODE=0
 NO_CACHE=0
 GITIGNORE_ON=0
 GITIGNORE_OFF=0
@@ -50,13 +49,12 @@ Flags:
   -Q P  Like -q but isolated: only login credentials mounted, no sockets, and a
         throwaway container so it can run alongside an existing one
   -t    Tear down the container and exit
-  -v    Open VS Code attached to the container
 EOF
   exit 0
 }
 
 # Parse flags
-while getopts "bBDgGhkP:Q:q:tv" opt; do
+while getopts "bBDgGhkP:Q:q:t" opt; do
   case $opt in
     b) BUILD=1;;
     B) NO_CACHE=1; BUILD=1;;
@@ -69,7 +67,6 @@ while getopts "bBDgGhkP:Q:q:tv" opt; do
     q) QUERY=1; QUERY_PROMPT="$OPTARG";;
     Q) ISOLATED=1; QUERY_PROMPT="$OPTARG";;
     t) DOWN=1;;
-    v) VSCODE=1;;
     *) usage;;
   esac
 done
@@ -128,18 +125,11 @@ else
   ln -sf "$HOME/.claude/claude.json" "$HOME/.claude.json"
 fi
 
-if [[ "${VIBE_VSCODE:-}" == "1" ]]; then
-  mkdir -p /tmp/vscode_queue /tmp/vscode_resp
-fi
 if [[ "${VIBE_BROWSER:-}" == "1" ]]; then
   mkdir -p /tmp/browser_queue
 fi
 if [[ "${VIBE_CLIPBOARD:-}" == "1" ]]; then
   mkdir -p /tmp/clipboard_queue /tmp/clipboard_resp
-fi
-
-if [[ -p /tmp/vscode_fifo ]] || [[ -d /tmp/vscode_queue ]]; then
-  export EDITOR="code -w"
 fi
 
 if [[ -p /tmp/browser_fifo ]] || [[ -d /tmp/browser_queue ]]; then
@@ -168,36 +158,6 @@ fi
 
 
 exec "$@"
-'
-
-CODE_WRAPPER='#!/bin/bash
-ARGS=()
-WAIT=0
-for arg in "$@"; do
-  if [[ "$arg" == "-w" || "$arg" == "--wait" ]]; then
-    WAIT=1
-    ARGS+=("$arg")
-  elif [[ "$arg" == -* ]]; then
-    ARGS+=("$arg")
-  else
-    ARGS+=("$(realpath "$arg")")
-  fi
-done
-if [[ -d /tmp/vscode_queue ]]; then
-  ID="$$.$RANDOM"
-  printf '"'"'%s\0'"'"' "${ARGS[@]}" > "/tmp/vscode_queue/${ID}"
-  if [[ "$WAIT" -eq 1 ]]; then
-    for _ in $(seq 1 300); do
-      [[ -f "/tmp/vscode_resp/${ID}" ]] && { rm -f "/tmp/vscode_resp/${ID}"; exit 0; }
-      sleep 0.1
-    done
-  fi
-elif [[ -p /tmp/vscode_fifo ]]; then
-  printf '"'"'%s\0'"'"' "${ARGS[@]}" > /tmp/vscode_fifo
-  if [[ "$WAIT" -eq 1 ]]; then
-    read -r < /tmp/vscode_fifo_resp
-  fi
-fi
 '
 
 BROWSER_WRAPPER='#!/bin/bash
@@ -290,10 +250,6 @@ ENV PATH="/home/$USER/.local/bin:$PATH"
 
 # printf, not echo: RUN uses dash, whose echo eats backslash escapes and
 # corrupts any wrapper containing them.
-ARG CODE_WRAPPER
-RUN printf '%s\n' "$CODE_WRAPPER" > /home/$USER/.local/bin/code \
-  && chmod +x /home/$USER/.local/bin/code
-
 ARG BROWSER_WRAPPER
 RUN printf '%s\n' "$BROWSER_WRAPPER" > /home/$USER/.local/bin/xdg-open \
   && chmod +x /home/$USER/.local/bin/xdg-open
@@ -317,7 +273,6 @@ build_image() {
     --build-arg "UID=$(id -u)" \
     --build-arg "GID=$(id -g)" \
     --build-arg "ENTRYPOINT=$ENTRYPOINT_SCRIPT" \
-    --build-arg "CODE_WRAPPER=$CODE_WRAPPER" \
     --build-arg "BROWSER_WRAPPER=$BROWSER_WRAPPER" \
     --build-arg "CLIPBOARD_WRAPPER=$CLIPBOARD_WRAPPER" \
     "$@" - <<< "$DOCKERFILE"
@@ -738,7 +693,7 @@ FIFO_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 if ((DOWN)); then
   docker rm -f "$CONTAINER_NAME" &>/dev/null || true
   while docker inspect "$CONTAINER_NAME" &>/dev/null; do sleep 0.1; done
-  rm -f "${FIFO_DIR}"/vibe-vscode-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-browser-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-clipboard-"${PROJECT_NAME}"-*.fifo
+  rm -f "${FIFO_DIR}"/vibe-browser-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-clipboard-"${PROJECT_NAME}"-*.fifo
   rm -rf "${FIFO_DIR}"/vibe-clipboard-resp-"${PROJECT_NAME}"-*
   # Clean up socat port-forwarding state
   if [[ -f "/tmp/.vibe-socat-pids-${PROJECT_NAME}" ]]; then
@@ -784,9 +739,6 @@ if [[ -f "$HOME/.gitconfig" ]]; then
 fi
 
 # Detect host capabilities
-HAS_CODE=0
-command -v code &>/dev/null && HAS_CODE=1
-
 if command -v open &>/dev/null; then
   OPEN_CMD="open"
 elif command -v xdg-open &>/dev/null; then
@@ -806,18 +758,9 @@ else
 fi
 
 # Setup IPC bridges (FIFOs on Linux, queue dirs polled via docker exec on macOS)
-VSCODE_FIFO="" VSCODE_FIFO_RESP="" BROWSER_FIFO="" CLIPBOARD_FIFO="" CLIPBOARD_RESP_DIR=""
+BROWSER_FIFO="" CLIPBOARD_FIFO="" CLIPBOARD_RESP_DIR=""
 if ! ((IS_MACOS)); then
   FIFO_ID="$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' ')"
-
-  if ((HAS_CODE)); then
-    VSCODE_FIFO="${FIFO_DIR}/vibe-vscode-${PROJECT_NAME}-${FIFO_ID}.fifo"
-    VSCODE_FIFO_RESP="${FIFO_DIR}/vibe-vscode-${PROJECT_NAME}-${FIFO_ID}-resp.fifo"
-    for fifo in "$VSCODE_FIFO" "$VSCODE_FIFO_RESP"; do
-      mkfifo "$fifo"
-      chmod 600 "$fifo"
-    done
-  fi
 
   if [[ -n "$OPEN_CMD" ]]; then
     BROWSER_FIFO="${FIFO_DIR}/vibe-browser-${PROJECT_NAME}-${FIFO_ID}.fifo"
@@ -834,7 +777,7 @@ if ! ((IS_MACOS)); then
     chmod 700 "$CLIPBOARD_RESP_DIR"
   fi
 fi
-export VSCODE_FIFO VSCODE_FIFO_RESP BROWSER_FIFO CLIPBOARD_FIFO CLIPBOARD_RESP_DIR
+export BROWSER_FIFO CLIPBOARD_FIFO CLIPBOARD_RESP_DIR
 
 
 # Check if the user has an on_build.sh script in ~/.vibe
@@ -882,8 +825,6 @@ if ! ((IS_MACOS)); then
   }
   add_host_mount "${SSH_AUTH_SOCK:-}" /tmp/ssh_auth_sock
   add_host_mount "${GNUPG_SOCK:-}" /tmp/gnupg_sock
-  add_host_mount "${VSCODE_FIFO:-}" /tmp/vscode_fifo
-  add_host_mount "${VSCODE_FIFO_RESP:-}" /tmp/vscode_fifo_resp
   add_host_mount "${BROWSER_FIFO:-}" /tmp/browser_fifo
   add_host_mount "${CLIPBOARD_FIFO:-}" /tmp/clipboard_fifo
   add_host_mount "${CLIPBOARD_RESP_DIR:-}" /tmp/clipboard_resp
@@ -932,7 +873,6 @@ ENVS=(
   -e COLORTERM
 )
 if ((IS_MACOS)); then
-  ((HAS_CODE)) && ENVS+=(-e "VIBE_VSCODE=1")
   [[ -n "$OPEN_CMD" ]] && ENVS+=(-e "VIBE_BROWSER=1")
   [[ -n "$CLIP_CMD" ]] && ENVS+=(-e "VIBE_CLIPBOARD=1")
   [[ -n "$SSH_RELAY_PORT" ]] && ENVS+=(-e "SSH_RELAY_PORT=${SSH_RELAY_PORT}")
@@ -979,48 +919,6 @@ elif [[ ! -f "$HOME/.claude-docker/.no-socat-warning" ]]; then
     esac
   fi
 fi
-
-# Helper to open VS Code attached to the container
-open_vscode() {
-  local container_id path hex_id
-  container_id="$(get_container_id)"
-  path="${1:-$TARGET_DIR}"
-  hex_id="$(printf '%s' "$container_id" | od -A n -t x1 | tr -d ' \n')"
-  code --folder-uri "vscode-remote://attached-container+${hex_id}${path}"
-}
-
-# Process a VS Code request (NUL-delimited args)
-handle_vscode_request() {
-  local args_raw="$1" reply_func="$2"
-  local container_id hex_id uri_base
-  container_id="$(get_container_id)"
-  hex_id="$(printf '%s' "$container_id" | od -A n -t x1 | tr -d ' \n')"
-  uri_base="vscode-remote://attached-container+${hex_id}"
-
-  local flags=() paths=() all_args=()
-  while IFS= read -r -d '' arg; do all_args+=("$arg"); done < <(printf '%s' "$args_raw")
-  for arg in "${all_args[@]}"; do
-    if [[ "$arg" == -* ]]; then flags+=("$arg"); else paths+=("$arg"); fi
-  done
-
-  local code_args=("${flags[@]}") has_folder=0
-  for path in "${paths[@]}"; do
-    if docker exec "$container_id" test -d "$path" 2>/dev/null; then
-      has_folder=1
-      code_args+=("--folder-uri" "${uri_base}${path}")
-    else
-      code_args+=("--file-uri" "${uri_base}${path}")
-    fi
-  done
-  if [[ "$has_folder" -eq 0 ]]; then
-    code_args+=("--folder-uri" "${uri_base}${TARGET_DIR}")
-  fi
-
-  code "${code_args[@]}"
-  if [[ " ${flags[*]} " == *" -w "* || " ${flags[*]} " == *" --wait "* ]]; then
-    eval "$reply_func"
-  fi
-}
 
 PBPASTE_IMG_CACHE=""
 
@@ -1086,29 +984,12 @@ read_host_clipboard() {
 }
 
 # Start background watchers
-WATCHER_PID=""
 BROWSER_WATCHER_PID=""
 CLIPBOARD_WATCHER_PID=""
 
 if ((IS_MACOS)); then
   # macOS: poll container queue dirs via docker exec
   CID="$CONTAINER_NAME"
-
-  if ((HAS_CODE)); then
-    (
-      while true; do
-        sleep 0.5
-        files="$(docker exec "$CID" ls /tmp/vscode_queue/ 2>/dev/null)" || continue
-        for f in $files; do
-          args_raw="$(docker exec "$CID" cat "/tmp/vscode_queue/$f" 2>/dev/null)" || continue
-          docker exec "$CID" rm -f "/tmp/vscode_queue/$f" 2>/dev/null
-          handle_vscode_request "$args_raw" "docker exec $CID touch /tmp/vscode_resp/$f"
-        done
-      done
-    ) &
-    WATCHER_PID=$!
-    disown
-  fi
 
   if [[ -n "$OPEN_CMD" ]]; then
     (
@@ -1148,17 +1029,6 @@ if ((IS_MACOS)); then
 
 else
   # Linux: read from FIFOs directly
-  if ((HAS_CODE)); then
-    (
-      while [[ -p "$VSCODE_FIFO" ]]; do
-        if args_raw=$(cat "$VSCODE_FIFO" 2>/dev/null) && [[ -n "$args_raw" ]]; then
-          handle_vscode_request "$args_raw" "echo done > $VSCODE_FIFO_RESP"
-        fi
-      done
-    ) &
-    WATCHER_PID=$!
-    disown
-  fi
 
   if [[ -n "$OPEN_CMD" ]]; then
     (
@@ -1196,9 +1066,6 @@ cleanup() {
   else
     printf '\033]0;\007'
   fi
-  if [[ -n "$WATCHER_PID" ]]; then
-    kill "$WATCHER_PID" 2>/dev/null || true
-  fi
   if [[ -n "$BROWSER_WATCHER_PID" ]]; then
     kill "$BROWSER_WATCHER_PID" 2>/dev/null || true
   fi
@@ -1215,20 +1082,11 @@ cleanup() {
   rm -f /tmp/.vibe-socat-"${PROJECT_NAME}"-*
   if ! ((KEEP)) && ! ((TORN_DOWN)); then
     remove_container
-    rm -f "$VSCODE_FIFO" "$VSCODE_FIFO_RESP" "$BROWSER_FIFO" "$CLIPBOARD_FIFO"
+    rm -f "$BROWSER_FIFO" "$CLIPBOARD_FIFO"
     rm -rf "$CLIPBOARD_RESP_DIR"
   fi
 }
 trap cleanup EXIT
-
-# Open VS Code if requested via -v flag
-if ((VSCODE)); then
-  if ! ((HAS_CODE)); then
-    echo "Error: 'code' command not found on host" >&2
-    exit 1
-  fi
-  open_vscode "$TARGET_DIR"
-fi
 
 # Set up exec command (WORKDIR computed above, shared with the container env).
 # Query mode drops -it so no TTY bytes leak into piped stdout and claude -p
@@ -1292,7 +1150,7 @@ clear
 # Tear down container before worktree removal so the mount is released
 if [[ -n "$WORKTREE" ]] && ! ((KEEP)); then
   remove_container
-  rm -f "$VSCODE_FIFO" "$VSCODE_FIFO_RESP" "$BROWSER_FIFO"
+  rm -f "$BROWSER_FIFO"
   TORN_DOWN=1
 fi
 
