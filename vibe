@@ -38,37 +38,37 @@ usage() {
 Usage: vibe [flags] [directory] [-- args...]
 
 Flags:
-  -B    Build the container image before starting
-  -d    Tear down the container and exit
+  -b    Build the container image before starting
+  -B    Build with no cache (implies -b)
   -D    Debug mode (shell into the container)
   -g    Force .claude/.gitignore on (add '*' entry)
   -G    Force .claude/.gitignore off (remove '*' entry)
   -h    Show this help message
   -k    Keep container running on exit
-  -N    Build with no cache (implies -B)
   -P    Mount parent directory read-only for sibling repo access
   -q P  Query one-off: run prompt P non-interactively, print result to stdout
   -Q P  Like -q but isolated: only login credentials mounted, no sockets, and a
         throwaway container so it can run alongside an existing one
+  -t    Tear down the container and exit
   -v    Open VS Code attached to the container
 EOF
   exit 0
 }
 
 # Parse flags
-while getopts "BdDgGhkNP:Q:q:v" opt; do
+while getopts "bBDgGhkP:Q:q:tv" opt; do
   case $opt in
-    B) BUILD=1;;
-    d) DOWN=1;;
+    b) BUILD=1;;
+    B) NO_CACHE=1; BUILD=1;;
     D) DEBUG=1;;
     g) GITIGNORE_ON=1;;
     G) GITIGNORE_OFF=1;;
     h) usage;;
     k) KEEP=1;;
-    N) NO_CACHE=1; BUILD=1;;
     P) PARENT_DIR="$(realpath -- "$OPTARG")";;
     q) QUERY=1; QUERY_PROMPT="$OPTARG";;
     Q) ISOLATED=1; QUERY_PROMPT="$OPTARG";;
+    t) DOWN=1;;
     v) VSCODE=1;;
     *) usage;;
   esac
