@@ -22,7 +22,6 @@ IS_MACOS=0
 DEBUG=0
 BUILD=0
 DOWN=0
-KEEP=0
 TORN_DOWN=0
 NO_CACHE=0
 GITIGNORE_ON=0
@@ -43,7 +42,6 @@ Flags:
   -g    Force .claude/.gitignore on (add '*' entry)
   -G    Force .claude/.gitignore off (remove '*' entry)
   -h    Show this help message
-  -k    Keep container running on exit
   -p    Shorthand for -P .. (mount the parent of the current directory)
   -P    Mount parent directory read-only for sibling repo access
   -q P  Query one-off: run prompt P non-interactively, print result to stdout
@@ -55,7 +53,7 @@ EOF
 }
 
 # Parse flags
-while getopts "bBDgGhkpP:Q:q:t" opt; do
+while getopts "bBDgGhpP:Q:q:t" opt; do
   case $opt in
     b) BUILD=1;;
     B) NO_CACHE=1; BUILD=1;;
@@ -63,7 +61,6 @@ while getopts "bBDgGhkpP:Q:q:t" opt; do
     g) GITIGNORE_ON=1;;
     G) GITIGNORE_OFF=1;;
     h) usage;;
-    k) KEEP=1;;
     p) PARENT_DIR="$(realpath -- ..)";;
     P) PARENT_DIR="$(realpath -- "$OPTARG")";;
     q) QUERY=1; QUERY_PROMPT="$OPTARG";;
@@ -1130,7 +1127,7 @@ cleanup() {
   fi
   rm -f /tmp/.vibe-socat-"${PROJECT_NAME}"-*
   rm -rf /tmp/.vibe-agent-"${PROJECT_NAME}"-*
-  if ! ((KEEP)) && ! ((TORN_DOWN)); then
+  if ! ((TORN_DOWN)); then
     remove_container
     rm -f "$BROWSER_FIFO" "$CLIPBOARD_FIFO"
     rm -rf "$CLIPBOARD_RESP_DIR"
@@ -1198,7 +1195,7 @@ fi
 clear
 
 # Tear down container before worktree removal so the mount is released
-if [[ -n "$WORKTREE" ]] && ! ((KEEP)); then
+if [[ -n "$WORKTREE" ]]; then
   remove_container
   rm -f "$BROWSER_FIFO"
   TORN_DOWN=1
