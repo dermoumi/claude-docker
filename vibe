@@ -658,7 +658,9 @@ TMUX_WINDOW=""
 if ((QUERY)); then
   :
 elif [[ -n "${TMUX:-}" ]]; then
-  TMUX_WINDOW="$(tmux display-message -p '#{window_id}')"
+  # -t "$TMUX_PANE": without it, tmux resolves the *focused* window, which may
+  # be another tab if the user switched away during setup.
+  TMUX_WINDOW="$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}')"
   tmux rename-window -t "$TMUX_WINDOW" "$WINDOW_TITLE"
 else
   printf '\033]0;%s\007' "$WINDOW_TITLE"
@@ -1108,7 +1110,8 @@ cleanup() {
   if ((QUERY)); then
     :
   elif [[ -n "$TMUX_WINDOW" ]]; then
-    tmux set-option -w -t "$TMUX_WINDOW" automatic-rename on
+    # A closed window must not abort cleanup: set -e stays active inside traps.
+    tmux set-option -w -t "$TMUX_WINDOW" automatic-rename on 2>/dev/null || true
   else
     printf '\033]0;\007'
   fi
