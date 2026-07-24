@@ -79,7 +79,9 @@ shift $((OPTIND - 1))
 IMAGE_NAME="vibe-base"
 ENTRYPOINT_SCRIPT='#!/bin/bash
 
-if [[ -n "${SSH_RELAY_PORT:-}" ]]; then
+if [[ -S /tmp/agent-relay/ssh.sock ]]; then
+  export SSH_AUTH_SOCK=/tmp/agent-relay/ssh.sock
+elif [[ -n "${SSH_RELAY_PORT:-}" ]]; then
   rm -f /tmp/ssh_auth_sock
   socat UNIX-LISTEN:/tmp/ssh_auth_sock,fork,mode=666 \
     TCP:host.docker.internal:${SSH_RELAY_PORT} &
@@ -89,7 +91,12 @@ elif [[ -S /tmp/ssh_auth_sock ]]; then
   export SSH_AUTH_SOCK=/tmp/ssh_auth_sock
 fi
 
-if [[ -n "${GPG_RELAY_PORT:-}" ]]; then
+if [[ -S /tmp/agent-relay/gpg.sock ]]; then
+  gpgconf --kill gpg-agent 2>/dev/null || true
+  GNUPG_SOCK=$(gpgconf --list-dir agent-socket)
+  mkdir -m 700 -p "$(dirname "$GNUPG_SOCK")"
+  ln -sf /tmp/agent-relay/gpg.sock "$GNUPG_SOCK"
+elif [[ -n "${GPG_RELAY_PORT:-}" ]]; then
   gpgconf --kill gpg-agent 2>/dev/null || true
   GNUPG_SOCK=$(gpgconf --list-dir agent-socket)
   mkdir -m 700 -p "$(dirname "$GNUPG_SOCK")"
@@ -102,6 +109,13 @@ elif [[ -S /tmp/gnupg_sock ]]; then
   GNUPG_SOCK=$(gpgconf --list-dir agent-socket)
   mkdir -m 700 -p "$(dirname "$GNUPG_SOCK")"
   ln -sf /tmp/gnupg_sock "$GNUPG_SOCK"
+fi
+
+# gpg must never autostart a local agent: launching one clobbers the socket link
+# above and shadows the forwarded agent with an empty one (fails: No secret key).
+if [[ -n "${GNUPG_SOCK:-}" ]]; then
+  grep -qxF no-autostart "$HOME/.gnupg/gpg.conf" 2>/dev/null \
+    || echo no-autostart >> "$HOME/.gnupg/gpg.conf"
 fi
 
 if [[ -n "${GPG_PUBKEYS:-}" && ! -f /tmp/.gpg_keys_imported ]]; then
@@ -703,6 +717,7 @@ if ((DOWN)); then
     rm -f "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
   fi
   rm -f /tmp/.vibe-socat-"${PROJECT_NAME}"-*
+  rm -rf /tmp/.vibe-agent-"${PROJECT_NAME}"-*
   exit 0
 fi
 
@@ -717,21 +732,47 @@ if command -v gpgconf &>/dev/null; then
   fi
 fi
 
-# On macOS, VirtioFS socket forwarding is unreliable — use socat TCP relay instead
+# Bridge the SSH/GPG agent sockets through a socat relay instead of bind-mounting
+# them directly. A bind mount pins the socket's inode at container-creation time,
+# so it goes stale when the forwarded agent is replaced (e.g. after an SSH
+# reconnect). socat's `fork` re-resolves SSH_AUTH_SOCK/GNUPG_SOCK on every new
+# connection, so a stable agent path (as ssht keeps it) always reaches the live
+# agent without recreating the container.
+#
+# macOS uses a TCP relay (VirtioFS unix-socket forwarding is unreliable). Linux
+# uses a unix-socket relay in a mode-700 mktemp dir bind-mounted into the
+# container: reachable only from this container (matching uid), no TCP exposure.
 SSH_RELAY_PORT=""
 GPG_RELAY_PORT=""
-if ((IS_MACOS)) && command -v socat &>/dev/null; then
-  if [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
-    SSH_RELAY_PORT=$(free_port)
-    socat "TCP-LISTEN:${SSH_RELAY_PORT},bind=127.0.0.1,reuseaddr,fork" \
-      "UNIX-CONNECT:${SSH_AUTH_SOCK}" 2>/dev/null &
-    echo "$! ssh-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
-  fi
-  if [[ -n "${GNUPG_SOCK:-}" && -S "$GNUPG_SOCK" ]]; then
-    GPG_RELAY_PORT=$(free_port)
-    socat "TCP-LISTEN:${GPG_RELAY_PORT},bind=127.0.0.1,reuseaddr,fork" \
-      "UNIX-CONNECT:${GNUPG_SOCK}" 2>/dev/null &
-    echo "$! gpg-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+AGENT_RELAY_DIR=""
+if command -v socat &>/dev/null; then
+  have_ssh_sock() { [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; }
+  have_gpg_sock() { [[ -n "${GNUPG_SOCK:-}" && -S "$GNUPG_SOCK" ]]; }
+  if ((IS_MACOS)); then
+    if have_ssh_sock; then
+      SSH_RELAY_PORT=$(free_port)
+      socat "TCP-LISTEN:${SSH_RELAY_PORT},bind=127.0.0.1,reuseaddr,fork" \
+        "UNIX-CONNECT:${SSH_AUTH_SOCK}" 2>/dev/null &
+      echo "$! ssh-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+    fi
+    if have_gpg_sock; then
+      GPG_RELAY_PORT=$(free_port)
+      socat "TCP-LISTEN:${GPG_RELAY_PORT},bind=127.0.0.1,reuseaddr,fork" \
+        "UNIX-CONNECT:${GNUPG_SOCK}" 2>/dev/null &
+      echo "$! gpg-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+    fi
+  elif have_ssh_sock || have_gpg_sock; then
+    AGENT_RELAY_DIR="$(mktemp -d "/tmp/.vibe-agent-${PROJECT_NAME}-XXXXXX")"
+    if have_ssh_sock; then
+      socat "UNIX-LISTEN:${AGENT_RELAY_DIR}/ssh.sock,fork,mode=666" \
+        "UNIX-CONNECT:${SSH_AUTH_SOCK}" 2>/dev/null &
+      echo "$! ssh-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+    fi
+    if have_gpg_sock; then
+      socat "UNIX-LISTEN:${AGENT_RELAY_DIR}/gpg.sock,fork,mode=666" \
+        "UNIX-CONNECT:${GNUPG_SOCK}" 2>/dev/null &
+      echo "$! gpg-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+    fi
   fi
 fi
 
@@ -825,8 +866,14 @@ if ! ((IS_MACOS)); then
     real=$(readlink -f "$src") || return 0
     VOLUMES+=(-v "$real:$dest")
   }
-  add_host_mount "${SSH_AUTH_SOCK:-}" /tmp/ssh_auth_sock
-  add_host_mount "${GNUPG_SOCK:-}" /tmp/gnupg_sock
+  if [[ -n "$AGENT_RELAY_DIR" ]]; then
+    # Preferred path: the socat relay dir survives agent churn across reconnects.
+    VOLUMES+=(-v "$AGENT_RELAY_DIR:/tmp/agent-relay")
+  else
+    # Fall back to bind-mounting the sockets directly (socat unavailable).
+    add_host_mount "${SSH_AUTH_SOCK:-}" /tmp/ssh_auth_sock
+    add_host_mount "${GNUPG_SOCK:-}" /tmp/gnupg_sock
+  fi
   add_host_mount "${BROWSER_FIFO:-}" /tmp/browser_fifo
   add_host_mount "${CLIPBOARD_FIFO:-}" /tmp/clipboard_fifo
   add_host_mount "${CLIPBOARD_RESP_DIR:-}" /tmp/clipboard_resp
@@ -874,11 +921,11 @@ ENVS=(
   -e "ON_BUILD=${ON_BUILD:-}"
   -e COLORTERM
 )
+[[ -n "$SSH_RELAY_PORT" ]] && ENVS+=(-e "SSH_RELAY_PORT=${SSH_RELAY_PORT}")
+[[ -n "$GPG_RELAY_PORT" ]] && ENVS+=(-e "GPG_RELAY_PORT=${GPG_RELAY_PORT}")
 if ((IS_MACOS)); then
   [[ -n "$OPEN_CMD" ]] && ENVS+=(-e "VIBE_BROWSER=1")
   [[ -n "$CLIP_CMD" ]] && ENVS+=(-e "VIBE_CLIPBOARD=1")
-  [[ -n "$SSH_RELAY_PORT" ]] && ENVS+=(-e "SSH_RELAY_PORT=${SSH_RELAY_PORT}")
-  [[ -n "$GPG_RELAY_PORT" ]] && ENVS+=(-e "GPG_RELAY_PORT=${GPG_RELAY_PORT}")
 fi
 
 docker run -d --name "$CONTAINER_NAME" \
@@ -1082,6 +1129,7 @@ cleanup() {
     rm -f "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
   fi
   rm -f /tmp/.vibe-socat-"${PROJECT_NAME}"-*
+  rm -rf /tmp/.vibe-agent-"${PROJECT_NAME}"-*
   if ! ((KEEP)) && ! ((TORN_DOWN)); then
     remove_container
     rm -f "$BROWSER_FIFO" "$CLIPBOARD_FIFO"
