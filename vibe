@@ -463,7 +463,7 @@ Disposable Ubuntu Docker container with passwordless sudo. Install freely.
 After installing a tool, append its directory to ~/.bin-paths.
 At session start, run: export PATH="$(cat ~/.bin-paths 2>/dev/null | tr '\n' ':'):$PATH"
 
-Save project context in .claude/: BACKLOG.md and PROGRESS.md in the branch-scoped directory named in your system prompt; MEMORY.md and per-memory files under .claude/memory/ are shared across all branches. .claude/ is bind-mounted from the parent repo, persists across worktrees. Max 150 lines per file.
+Save project context in .claude/: BACKLOG.md and PROGRESS.md in the location named in your system prompt (project-wide at .claude/ root on the default branch, .claude/branches/<branch>/ elsewhere); MEMORY.md and per-memory files under .claude/memory/ are shared across all branches. .claude/ is bind-mounted from the parent repo, persists across worktrees. Max 150 lines per file.
 ENV
 inject_section "## Environment (maintained by the vibe utility)" "$ENV_CONTENT"
 
@@ -1173,10 +1173,26 @@ fi
 
 # .claude/ is shared across worktrees, so the branch-scoped path can only be
 # resolved per-container — baking it into CLAUDE.md would race between sessions.
+# The default branch owns the global BACKLOG/PROGRESS at .claude/ root; other
+# branches get their own subdirectory and read/update access to the global ones.
 VIBE_BRANCH="${WORKTREE_BRANCH:-$(git -C "$WORKDIR" branch --show-current 2>/dev/null)}"
-VIBE_BRANCH_SLUG="${VIBE_BRANCH:-detached}"
-VIBE_BRANCH_SLUG="${VIBE_BRANCH_SLUG//\//-}"
-SYSTEM_PROMPT+="BACKLOG.md and PROGRESS.md for this branch live in .claude/branches/${VIBE_BRANCH_SLUG}/ — read and write them there, never at .claude/ root, and create the directory if it does not exist. .claude/ is shared across all worktrees; only that subdirectory is yours. MEMORY.md and .claude/memory/ remain shared."$'\n\n'
+DEFAULT_BRANCH="$(git -C "$WORKDIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)"
+DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
+if [[ -z "$DEFAULT_BRANCH" ]]; then
+  for _branch in main master dev; do
+    if git -C "$WORKDIR" show-ref --verify --quiet "refs/heads/$_branch"; then
+      DEFAULT_BRANCH="$_branch"
+      break
+    fi
+  done
+fi
+if [[ -n "$VIBE_BRANCH" && "$VIBE_BRANCH" == "$DEFAULT_BRANCH" ]]; then
+  SYSTEM_PROMPT+="You are on the default branch '${VIBE_BRANCH}'. BACKLOG.md and PROGRESS.md live at .claude/ root — they are the project-wide files for global tasks. Keep plans for a specific task or epic in that task's branch directory under .claude/branches/, not here. .claude/ is shared across all worktrees. MEMORY.md and .claude/memory/ remain shared."$'\n\n'
+else
+  VIBE_BRANCH_SLUG="${VIBE_BRANCH:-detached}"
+  VIBE_BRANCH_SLUG="${VIBE_BRANCH_SLUG//\//-}"
+  SYSTEM_PROMPT+="BACKLOG.md and PROGRESS.md for this branch live in .claude/branches/${VIBE_BRANCH_SLUG}/ — read and write them there, and create the directory if it does not exist. The BACKLOG.md and PROGRESS.md at .claude/ root are project-wide and owned by the default branch: read them for global context and update a global task's status when your work changes it, but keep this branch's own plans and progress in your subdirectory. .claude/ is shared across all worktrees. MEMORY.md and .claude/memory/ remain shared."$'\n\n'
+fi
 
 if [[ -n "$PARENT_DIR" ]]; then
   SYSTEM_PROMPT+="Sibling repos available read-only at /repos/. Working project: $(realpath --relative-to="$PARENT_DIR" "$TARGET_DIR")."$'\n'
