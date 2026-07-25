@@ -1189,12 +1189,12 @@ fi
 # resolved per-container — baking it into CLAUDE.md would race between sessions.
 # The default branch owns the global BACKLOG/PROGRESS at .claude/ root; other
 # branches get their own subdirectory and read/update access to the global ones.
-VIBE_BRANCH="${WORKTREE_BRANCH:-$(git -C "$WORKDIR" branch --show-current 2>/dev/null)}"
-DEFAULT_BRANCH="$(git -C "$WORKDIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)"
+VIBE_BRANCH="${WORKTREE_BRANCH:-$(git -C "$WORKDIR" branch --show-current 2>/dev/null || true)}"
+DEFAULT_BRANCH="$(git -C "$WORKDIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
 DEFAULT_BRANCH="${DEFAULT_BRANCH#origin/}"
 if [[ -z "$DEFAULT_BRANCH" ]]; then
   for _branch in main master dev; do
-    if git -C "$WORKDIR" show-ref --verify --quiet "refs/heads/$_branch"; then
+    if git -C "$WORKDIR" show-ref --verify --quiet "refs/heads/$_branch" 2>/dev/null; then
       DEFAULT_BRANCH="$_branch"
       break
     fi
