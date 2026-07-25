@@ -1129,7 +1129,11 @@ cleanup() {
     rm -f "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
   fi
   rm -f /tmp/.vibe-socat-"${PROJECT_NAME}"-*
-  rm -rf /tmp/.vibe-agent-"${PROJECT_NAME}"-*
+  # Only this session's relay dir: a glob races a second session for the same
+  # project — docker recreates its deleted mount source as root, undeletable.
+  if [[ -n "${AGENT_RELAY_DIR:-}" ]]; then
+    rm -rf "$AGENT_RELAY_DIR"
+  fi
   if ! ((TORN_DOWN)); then
     remove_container
     rm -f "$BROWSER_FIFO" "$CLIPBOARD_FIFO"
