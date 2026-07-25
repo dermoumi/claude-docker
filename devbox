@@ -79,7 +79,7 @@ command -v socat &>/dev/null || { echo "devbox: socat is required" >&2; exit 1; 
 
 mkdir -p "$(dirname "$LOCAL_SOCK")"
 rm -f "$LOCAL_SOCK"
-socat "UNIX-LISTEN:${LOCAL_SOCK},fork,mode=600" "EXEC:$(realpath "$0") --serve" &
+socat -t 30 "UNIX-LISTEN:${LOCAL_SOCK},fork,mode=600" "EXEC:$(realpath "$0") --serve" &
 SERVE_PID=$!
 trap 'kill "$SERVE_PID" 2>/dev/null; rm -f "$LOCAL_SOCK"' EXIT
 

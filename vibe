@@ -220,7 +220,7 @@ else
   REQ="$TYPE"
 fi
 if [[ "$IPC" == "socket" ]]; then
-  printf "%s\n" "$REQ" | socat - UNIX-CONNECT:/tmp/clip.sock 2>/dev/null
+  printf "%s\n" "$REQ" | socat -t 30 - UNIX-CONNECT:/tmp/clip.sock 2>/dev/null
   exit $?
 fi
 if [[ "$IPC" == "queue" ]]; then
@@ -229,7 +229,7 @@ else
   echo "${ID} ${REQ}" > /tmp/clipboard_fifo
 fi
 RESP="/tmp/clipboard_resp/${ID}"
-for _ in $(seq 1 50); do
+for _ in $(seq 1 300); do
   [[ -f "$RESP" ]] && { cat "$RESP"; rm -f "$RESP"; exit 0; }
   sleep 0.1
 done
@@ -1174,7 +1174,10 @@ if ((IS_MACOS)); then
           [[ -n "$req" ]] || continue
           tmpfile="$(mktemp)"
           read_host_clipboard "$req" "$tmpfile"
-          docker exec -i "$CID" tee "/tmp/clipboard_resp/$f" < "$tmpfile" >/dev/null
+          # Write via tmp+mv so the polling wrapper never reads a partial file
+          docker exec -i "$CID" sh -c \
+            "cat > '/tmp/clipboard_resp/$f.tmp' && mv '/tmp/clipboard_resp/$f.tmp' '/tmp/clipboard_resp/$f'" \
+            < "$tmpfile"
           rm -f "$tmpfile"
         done
       done
