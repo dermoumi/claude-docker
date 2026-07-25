@@ -710,11 +710,12 @@ if ((DOWN)); then
   while docker inspect "$CONTAINER_NAME" &>/dev/null; do sleep 0.1; done
   rm -f "${FIFO_DIR}"/vibe-browser-"${PROJECT_NAME}"-*.fifo "${FIFO_DIR}"/vibe-clipboard-"${PROJECT_NAME}"-*.fifo
   rm -rf "${FIFO_DIR}"/vibe-clipboard-resp-"${PROJECT_NAME}"-*
-  # Clean up socat port-forwarding state
-  if [[ -f "/tmp/.vibe-socat-pids-${PROJECT_NAME}" ]]; then
-    while read -r pid _; do kill "$pid" 2>/dev/null || true; done < "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
-    rm -f "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
-  fi
+  # Clean up socat port-forwarding state across all sessions of this project
+  for pidfile in "/tmp/.vibe-socat-pids-${PROJECT_NAME}" /tmp/.vibe-socat-pids-"${PROJECT_NAME}"-*; do
+    [[ -f "$pidfile" ]] || continue
+    while read -r pid _; do kill "$pid" 2>/dev/null || true; done < "$pidfile"
+    rm -f "$pidfile"
+  done
   rm -f /tmp/.vibe-socat-"${PROJECT_NAME}"-*
   rm -rf /tmp/.vibe-agent-"${PROJECT_NAME}"-*
   exit 0
@@ -744,6 +745,9 @@ fi
 SSH_RELAY_PORT=""
 GPG_RELAY_PORT=""
 AGENT_RELAY_DIR=""
+# Session-scoped pid file: overlapping sessions of the same project must not
+# kill each other's relays/forwards on exit.
+SOCAT_PIDFILE="/tmp/.vibe-socat-pids-${PROJECT_NAME}-$$"
 if command -v socat &>/dev/null; then
   have_ssh_sock() { [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; }
   have_gpg_sock() { [[ -n "${GNUPG_SOCK:-}" && -S "$GNUPG_SOCK" ]]; }
@@ -752,25 +756,25 @@ if command -v socat &>/dev/null; then
       SSH_RELAY_PORT=$(free_port)
       socat "TCP-LISTEN:${SSH_RELAY_PORT},bind=127.0.0.1,reuseaddr,fork" \
         "UNIX-CONNECT:${SSH_AUTH_SOCK}" 2>/dev/null &
-      echo "$! ssh-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+      echo "$! ssh-relay" >> "$SOCAT_PIDFILE"
     fi
     if have_gpg_sock; then
       GPG_RELAY_PORT=$(free_port)
       socat "TCP-LISTEN:${GPG_RELAY_PORT},bind=127.0.0.1,reuseaddr,fork" \
         "UNIX-CONNECT:${GNUPG_SOCK}" 2>/dev/null &
-      echo "$! gpg-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+      echo "$! gpg-relay" >> "$SOCAT_PIDFILE"
     fi
   elif have_ssh_sock || have_gpg_sock; then
     AGENT_RELAY_DIR="$(mktemp -d "/tmp/.vibe-agent-${PROJECT_NAME}-XXXXXX")"
     if have_ssh_sock; then
       socat "UNIX-LISTEN:${AGENT_RELAY_DIR}/ssh.sock,fork,mode=666" \
         "UNIX-CONNECT:${SSH_AUTH_SOCK}" 2>/dev/null &
-      echo "$! ssh-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+      echo "$! ssh-relay" >> "$SOCAT_PIDFILE"
     fi
     if have_gpg_sock; then
       socat "UNIX-LISTEN:${AGENT_RELAY_DIR}/gpg.sock,fork,mode=666" \
         "UNIX-CONNECT:${GNUPG_SOCK}" 2>/dev/null &
-      echo "$! gpg-relay" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+      echo "$! gpg-relay" >> "$SOCAT_PIDFILE"
     fi
   fi
 fi
@@ -950,7 +954,7 @@ if command -v socat &>/dev/null; then
         [[ -f "$MARKER" ]] && continue
         touch "$MARKER"
         socat "TCP-LISTEN:${PORT},reuseaddr,fork" "EXEC:docker exec -i ${CID} socat STDIO TCP\:127.0.0.1\:${PORT}" 2>/dev/null &
-        echo "$! $PORT" >> "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+        echo "$! $PORT" >> "$SOCAT_PIDFILE"
       done
     done
   ) &
@@ -1124,11 +1128,17 @@ cleanup() {
   if [[ -n "$PORT_WATCHER_PID" ]]; then
     kill "$PORT_WATCHER_PID" 2>/dev/null || true
   fi
-  if [[ -f "/tmp/.vibe-socat-pids-${PROJECT_NAME}" ]]; then
-    while read -r pid _; do kill "$pid" 2>/dev/null || true; done < "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
-    rm -f "/tmp/.vibe-socat-pids-${PROJECT_NAME}"
+  # Kill only this session's relays/forwards; a newer session for the same
+  # project may still be running its own.
+  if [[ -f "$SOCAT_PIDFILE" ]]; then
+    while read -r pid port; do
+      kill "$pid" 2>/dev/null || true
+      if [[ "$port" =~ ^[0-9]+$ ]]; then
+        rm -f "/tmp/.vibe-socat-${PROJECT_NAME}-${port}"
+      fi
+    done < "$SOCAT_PIDFILE"
+    rm -f "$SOCAT_PIDFILE"
   fi
-  rm -f /tmp/.vibe-socat-"${PROJECT_NAME}"-*
   # Only this session's relay dir: a glob races a second session for the same
   # project — docker recreates its deleted mount source as root, undeletable.
   if [[ -n "${AGENT_RELAY_DIR:-}" ]]; then
