@@ -850,6 +850,38 @@ if [[ ! -f "$CLAUDE_JSON" ]]; then
   echo '{}' > "$CLAUDE_JSON"
 fi
 
+# Ensure baseline global Claude settings; files are rewritten only when a
+# value actually differs, and left untouched if they contain invalid JSON.
+python3 - "$CLAUDE_HOME/settings.json" "$CLAUDE_JSON" <<'PY'
+import json, sys
+
+def merge(path, want):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        data = {}
+    except ValueError:
+        return
+    before = json.dumps(data, sort_keys=True)
+    for key, value in want.items():
+        if isinstance(value, dict) and isinstance(data.get(key), dict):
+            data[key].update(value)
+        else:
+            data[key] = value
+    if json.dumps(data, sort_keys=True) != before:
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+
+merge(sys.argv[1], {
+    "attribution": {"commit": "", "pr": ""},
+    "skipDangerousModePermissionPrompt": True,
+    "theme": "auto",
+})
+merge(sys.argv[2], {"autoUpdates": False})
+PY
+
 # Build volumes array
 VOLUMES=(
   -v "$TARGET_DIR:$TARGET_DIR${VOLUME_RO:-}"
