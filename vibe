@@ -460,8 +460,8 @@ read -r -d '' DEFAULT_RULES <<'RULES' || true
 - If deviating from the plan, stop and discuss first.
 - Small steps: max ~300 lines per step, one reviewable commit each. Ask before the next.
 - Comments: max 2 lines, only when why isn't obvious; prefer none. No decorative comments, banners, or ASCII art.
-- NEVER commit or push unless the user explicitly says "commit". Suggest a conventional commit message instead. One approval ≠ blanket permission.
-- Never push to remote.
+- NEVER commit unless the user explicitly says "commit". Suggest a conventional commit message instead. One approval ≠ blanket permission.
+- Only push task branches, as `git push [-u] origin <branch>`. Never push to main/master; every other push form is blocked.
 RULES
 
 RULES_FILE="$HOME/.claude-docker/rules.md"
@@ -515,26 +515,57 @@ try:
     cmd = (json.load(sys.stdin).get("tool_input") or {}).get("command") or ""
 except Exception:
     sys.exit(0)
-subs, toks, i = [], cmd.split(), 0
+
+SEPARATORS = {"&&", "||", ";", "|", "&"}
+SAFE_PUSH_FLAGS = {"-u", "--set-upstream"}
+# Global git flags whose value is a separate token; skip it or it
+# masquerades as the subcommand (`git -C /repo push` would pass unchecked).
+VALUE_FLAGS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+# Literal branch names only: no leading dash, no colon refspecs, no $vars/quotes.
+BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+BLOCKED_BRANCHES = {"main", "master", "HEAD"}
+
+def push_allowed(args):
+    flags = [a for a in args if a.startswith("-")]
+    rest = [a for a in args if not a.startswith("-")]
+    if any(f not in SAFE_PUSH_FLAGS for f in flags):
+        return False  # blocks --force, --delete, --mirror, --all, --tags, -f, ...
+    if len(rest) != 2 or rest[0] != "origin":
+        return False  # exactly: origin <branch>; no refspecs, no other remotes
+    branch = rest[1]
+    if not BRANCH_RE.match(branch) or branch.startswith("refs/"):
+        return False
+    return branch not in BLOCKED_BRANCHES
+
+blocked_commit, toks, i = False, cmd.split(), 0
 while i < len(toks):
     if toks[i] == "git" or toks[i].endswith("/git"):
         j = i + 1
         while j < len(toks) and toks[j].startswith("-"):
+            if toks[j] in VALUE_FLAGS:
+                j += 1
             j += 1
         if j < len(toks):
-            subs.append(toks[j])
+            sub = toks[j]
+            args, k = [], j + 1
+            while k < len(toks) and toks[k] not in SEPARATORS:
+                args.append(toks[k])
+                k += 1
+            if sub == "push" and not push_allowed(args):
+                sys.stderr.write("vibe: push blocked — only `git push [-u] origin "
+                                 "<task-branch>` (never main) is allowed by policy.")
+                sys.exit(2)
+            if sub == "commit":
+                blocked_commit = True
+            i = k
+            continue
         i = j + 1
         continue
     i += 1
-if "push" in subs:
-    sys.stderr.write("vibe: pushing to a remote is disabled by policy "
-                     "(Personal Rules: never push). Ask the user to push manually.")
-    sys.exit(2)
-if "commit" in subs:
+
+if blocked_commit and not os.path.exists(SENT):
     # Approval is turn-scoped: prompt_gate clears the sentinel on the next
     # user message, so one "commit" request authorizes every commit this turn.
-    if os.path.exists(SENT):
-        sys.exit(0)
     sys.stderr.write("vibe: commit blocked — the user's latest message did not ask "
                      "for a commit (Personal Rules: never commit unless explicitly "
                      "told). Suggest a conventional-commit message and wait.")
