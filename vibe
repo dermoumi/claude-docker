@@ -353,7 +353,13 @@ elif [[ "${1:-}" == w:* ]]; then
     if git show-ref --verify --quiet "refs/heads/$WORKTREE_BRANCH"; then
       git worktree add "$WORKTREE" "$WORKTREE_BRANCH"
     else
-      git worktree add -b "$WORKTREE_BRANCH" "$WORKTREE"
+      # Branch may exist only on the remote; fetch is best-effort (offline, no origin)
+      git fetch origin "$WORKTREE_BRANCH" 2>/dev/null || true
+      if git show-ref --verify --quiet "refs/remotes/origin/$WORKTREE_BRANCH"; then
+        git worktree add --track -b "$WORKTREE_BRANCH" "$WORKTREE" "origin/$WORKTREE_BRANCH"
+      else
+        git worktree add -b "$WORKTREE_BRANCH" "$WORKTREE"
+      fi
     fi
   fi
 
