@@ -845,6 +845,22 @@ if [[ -d "$HOST_PROJECT_DIR" ]] && [[ ! -d "${CLAUDE_PROJECTS}/${PROJECT_KEY}" ]
   mv "$HOST_PROJECT_DIR" "${CLAUDE_PROJECTS}/${PROJECT_KEY}"
 fi
 
+# Claude keys auto-memory by cwd path, so each worktree would start blank.
+# Link the worktree project's memory to the main project's; sessions stay separate.
+if [[ -n "${WORKTREE_REL:-}" ]]; then
+  WT_KEY="$(echo "${TARGET_DIR}/${WORKTREE_REL}" | sed 's/[^a-zA-Z0-9]/-/g')"
+  WT_MEMORY="${CLAUDE_PROJECTS}/${WT_KEY}/memory"
+  mkdir -p "${CLAUDE_PROJECTS}/${PROJECT_KEY}/memory" "${CLAUDE_PROJECTS}/${WT_KEY}"
+  if [[ -L "$WT_MEMORY" || ! -e "$WT_MEMORY" ]]; then
+    ln -sfn "../${PROJECT_KEY}/memory" "$WT_MEMORY"
+  elif [[ -z "$(ls -A "$WT_MEMORY")" ]]; then
+    rmdir "$WT_MEMORY"
+    ln -s "../${PROJECT_KEY}/memory" "$WT_MEMORY"
+  else
+    echo "Note: worktree already has its own memory in ${WT_MEMORY}, leaving it unshared." >&2
+  fi
+fi
+
 CLAUDE_JSON="${HOME}/.claude.json"
 if [[ ! -f "$CLAUDE_JSON" ]]; then
   echo '{}' > "$CLAUDE_JSON"
