@@ -688,26 +688,21 @@ if bad:
                    "Change only the comment text, not the surrounding code."),
         "systemMessage": f"vibe: {' + '.join(kinds)} in {base} comments - blocked"}))
 elif mx >= 3 and mx > mx_old:
-    emit(f"vibe: {mx}-line comment in {base} - trim it to 2 or fewer",
-         (f"This change wrote a {mx}-line comment block in {base}. Personal Rules cap "
-          "comments at 2 lines and prefer one, or none at all. Trim it to a single "
-          "line if the why still fits, two at the absolute most. Keep it longer only "
-          "if shortening would genuinely lose something, and say why if you do."))
+    emit(f"vibe: {mx}-line comment in {base} - drop it or trim to 2 or fewer",
+         (f"This change wrote a {mx}-line comment block in {base}. Personal Rules "
+          "prefer no comment at all: delete it outright if the code already says "
+          "this, or if it restates what the names and structure make plain. If it "
+          "carries a why the code cannot, keep that why in one line, two at the "
+          "absolute most. Stay longer only if shortening would genuinely lose "
+          "something, and say why if you do."))
 elif mx == 2 and mx > mx_old:
-    emit(f"vibe: 2-line comment in {base} - condense to 1 if you can",
+    emit(f"vibe: 2-line comment in {base} - drop it or condense to 1",
          (f"This change wrote a 2-line comment in {base}. Personal Rules prefer no "
-          "comment at all, and a single line where one earns its place. Condense it "
-          "to one line if the meaning survives; keep both lines only when condensing "
-          "would drop something that matters."))
+          "comment at all: delete it if the code already conveys this on its own. "
+          "If it explains a why the code cannot, condense it to one line; keep both "
+          "lines only when condensing would drop something that matters."))
 sys.exit(0)
 PY
-
-# Keep local settings and generated hooks out of git unless already fully ignored.
-if ! grep -qxF '*' "$GITIGNORE" 2>/dev/null; then
-  for entry in 'settings.local.json' 'vibe-hooks/'; do
-    grep -qxF "$entry" "$GITIGNORE" 2>/dev/null || echo "$entry" >> "$GITIGNORE"
-  done
-fi
 
 VIBE_DIR="$VIBE_DIR" CLAUDE_HOME="$CLAUDE_HOME" python3 - <<'PY'
 import json, os, sys
