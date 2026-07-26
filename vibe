@@ -427,11 +427,17 @@ elif ! ((VIBE_DIR_EXISTED)); then
 fi
 export VIBE_DIR
 
-# Inject/update a managed section in .claude/CLAUDE.md
+# Rules, hooks and settings live in the global claude home so vibe leaves no
+# footprint in the project (a third-party repo may ship its own .claude/).
+CLAUDE_HOME="${HOME}/.claude"
+mkdir -p "$CLAUDE_HOME"
+export CLAUDE_HOME
+
+# Inject/update a managed section in ~/.claude/CLAUDE.md
 # Usage: inject_section "## Heading" "content"
 inject_section() {
   local heading="$1" content="$2"
-  local claude_md="$VIBE_DIR/CLAUDE.md"
+  local claude_md="$CLAUDE_HOME/CLAUDE.md"
   local block
   block="$(printf '%s\n\n%s' "$heading" "$content")"
 
@@ -486,10 +492,28 @@ Save project context in .claude/: BACKLOG.md and PROGRESS.md in the location nam
 ENV
 inject_section "## Environment (maintained by the vibe utility)" "$ENV_CONTENT"
 
+# Drop what older versions wrote into the project; nothing refreshes it now that
+# rules, hooks and settings are global, so it would linger as stale duplicates.
+PROJECT_CLAUDE_MD="$VIBE_DIR/CLAUDE.md"
+if [[ -f "$PROJECT_CLAUDE_MD" ]] && grep -q '^## .* (maintained by the vibe utility)$' "$PROJECT_CLAUDE_MD"; then
+  awk '
+    /^## .* \(maintained by the vibe utility\)$/ { skip=1; next }
+    skip && /^## / { skip=0 }
+    !skip { print }
+  ' "$PROJECT_CLAUDE_MD" > "$PROJECT_CLAUDE_MD.tmp"
+  # Only ours was in there: drop the file rather than leave it empty.
+  if grep -q '[^[:space:]]' "$PROJECT_CLAUDE_MD.tmp"; then
+    mv "$PROJECT_CLAUDE_MD.tmp" "$PROJECT_CLAUDE_MD"
+  else
+    rm -f "$PROJECT_CLAUDE_MD.tmp" "$PROJECT_CLAUDE_MD"
+  fi
+fi
+rm -rf "$VIBE_DIR/vibe-hooks"
+
 # Enforce the rules that prompts can't reliably enforce, via Claude Code hooks.
 # Scripts are (re)written each run; only their references are merged into
-# .claude/settings.local.json so an existing user config is never clobbered.
-HOOKS_DIR="$VIBE_DIR/vibe-hooks"
+# ~/.claude/settings.json so an existing user config is never clobbered.
+HOOKS_DIR="$CLAUDE_HOME/vibe-hooks"
 mkdir -p "$HOOKS_DIR"
 
 cat > "$HOOKS_DIR/prompt_gate.py" <<'PY'
@@ -666,9 +690,9 @@ if ! grep -qxF '*' "$GITIGNORE" 2>/dev/null; then
   done
 fi
 
-VIBE_DIR="$VIBE_DIR" python3 - <<'PY'
+VIBE_DIR="$VIBE_DIR" CLAUDE_HOME="$CLAUDE_HOME" python3 - <<'PY'
 import json, os, sys
-path = os.path.join(os.environ["VIBE_DIR"], "settings.local.json")
+path = os.path.join(os.environ["CLAUDE_HOME"], "settings.json")
 data = {}
 if os.path.exists(path):
     try:
@@ -676,8 +700,8 @@ if os.path.exists(path):
             data = json.load(f) or {}
     except Exception:
         os.replace(path, path + ".bak")
-        sys.stderr.write("vibe: existing settings.local.json was unparseable; "
-                         "backed up to settings.local.json.bak\n")
+        sys.stderr.write("vibe: existing settings.json was unparseable; "
+                         "backed up to settings.json.bak\n")
         data = {}
 if not isinstance(data, dict):
     data = {}
@@ -698,7 +722,7 @@ def strip(lst):
     return out
 def cmd(name):
     return {"type": "command",
-            "command": f'python3 "$CLAUDE_PROJECT_DIR/.claude/vibe-hooks/{name}"'}
+            "command": f'python3 "$HOME/.claude/vibe-hooks/{name}"'}
 vibe = {
     "UserPromptSubmit": [{"hooks": [cmd("prompt_gate.py")]}],
     "PreToolUse": [
@@ -711,9 +735,40 @@ vibe = {
 for event, entries in vibe.items():
     hooks[event] = strip(hooks.get(event)) + entries
 data["hooks"] = hooks
-with open(path, "w") as f:
+# Atomic: this is the real global settings file, and concurrent vibe launches
+# share it, so a truncated write would lose theme/attribution/permissions.
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
+os.replace(tmp, path)
+
+# Older versions put these in the project; strip ours and drop the file if
+# nothing of the user's remains.
+old = os.path.join(os.environ["VIBE_DIR"], "settings.local.json")
+if os.path.exists(old):
+    try:
+        with open(old) as f:
+            d = json.load(f) or {}
+    except Exception:
+        d = None
+    if isinstance(d, dict):
+        h = {}
+        for event, entries in (d.get("hooks") or {}).items():
+            kept = strip(entries)
+            if kept:
+                h[event] = kept
+        if h:
+            d["hooks"] = h
+        else:
+            d.pop("hooks", None)
+        if d:
+            with open(old + ".tmp", "w") as f:
+                json.dump(d, f, indent=2)
+                f.write("\n")
+            os.replace(old + ".tmp", old)
+        else:
+            os.remove(old)
 PY
 
 
@@ -914,7 +969,6 @@ if [[ -f "$ON_BUILD_SCRIPT" ]]; then
   export ON_BUILD
 fi
 
-CLAUDE_HOME="${HOME}/.claude"
 CLAUDE_STATE="${HOME}/.local/state/claude"
 CLAUDE_PROJECTS="${VIBE_DIR}/.projects"
 mkdir -p "$CLAUDE_HOME" "$CLAUDE_STATE" "$CLAUDE_PROJECTS"
@@ -950,7 +1004,7 @@ fi
 # Ensure baseline global Claude settings; files are rewritten only when a
 # value actually differs, and left untouched if they contain invalid JSON.
 python3 - "$CLAUDE_HOME/settings.json" "$CLAUDE_JSON" <<'PY'
-import json, sys
+import json, os, sys
 
 def merge(path, want):
     try:
@@ -967,9 +1021,10 @@ def merge(path, want):
         else:
             data[key] = value
     if json.dumps(data, sort_keys=True) != before:
-        with open(path, "w") as f:
+        with open(path + ".tmp", "w") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
+        os.replace(path + ".tmp", path)
 
 merge(sys.argv[1], {
     "attribution": {"commit": "", "pr": ""},
