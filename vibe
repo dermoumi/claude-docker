@@ -459,7 +459,7 @@ read -r -d '' DEFAULT_RULES <<'RULES' || true
 - Simple and clean over hacky or overengineered.
 - If deviating from the plan, stop and discuss first.
 - Small steps: max ~300 lines per step, one reviewable commit each. Ask before the next.
-- Comments: max 2 lines, only when why isn't obvious; prefer none. No decorative comments, banners, or ASCII art.
+- Comments: max 2 lines, only when why isn't obvious; prefer none. No decorative comments, banners, ASCII art, em dashes, or emoji.
 - NEVER commit unless the user explicitly says "commit". Suggest a conventional commit message instead. One approval ≠ blanket permission.
 - Only push task branches, as `git push [-u] origin <branch>`. Never push to main/master; every other push form is blocked.
 RULES
