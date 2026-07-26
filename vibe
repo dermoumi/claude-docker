@@ -621,41 +621,59 @@ base = os.path.basename(path)
 ext = os.path.splitext(path)[1].lower()
 if ext not in CODE and base.lower().split(".")[0] not in NAMES:
     sys.exit(0)
-parts = []
-if isinstance(ti.get("new_string"), str): parts.append(ti["new_string"])
-if isinstance(ti.get("content"), str): parts.append(ti["content"])
-for e in ti.get("edits") or []:
-    if isinstance(e, dict) and isinstance(e.get("new_string"), str):
-        parts.append(e["new_string"])
-run = mx = 0
-bad = []
-c_block = False
-lua_close = None  # e.g. "]]" or "]=]" while inside a Lua --[[ ... ]] comment
-for ln in "\n".join(parts).split("\n"):
-    s = ln.strip()
-    is_comment = False
-    if c_block:
-        is_comment = True
-        if "*/" in s: c_block = False
-    elif lua_close is not None:
-        is_comment = True
-        if lua_close in s: lua_close = None
-    elif s.startswith("/*"):
-        is_comment = True
-        if "*/" not in s: c_block = True
-    elif ext in DASH and s.startswith("--"):
-        is_comment = True
-        m = re.match(r"--\[(=*)\[", s)
-        if m:
-            close = "]" + "=" * len(m.group(1)) + "]"
-            if close not in s[m.end():]: lua_close = close
-    elif s.startswith(("//", "#")):
-        is_comment = True
-    if is_comment and s:
-        run += 1; mx = max(mx, run)
-        if EMDASH in s or EMOJI.search(s): bad.append(s)
-    else:
-        run = 0
+
+def collect(key, extra=None):
+    out = []
+    if isinstance(ti.get(key), str): out.append(ti[key])
+    if extra and isinstance(ti.get(extra), str): out.append(ti[extra])
+    for e in ti.get("edits") or []:
+        if isinstance(e, dict) and isinstance(e.get(key), str): out.append(e[key])
+    return "\n".join(out)
+
+def scan(text):
+    run = mx = 0
+    bad = []
+    c_block = False
+    lua_close = None  # e.g. "]]" or "]=]" while inside a Lua --[[ ... ]] comment
+    for ln in text.split("\n"):
+        s = ln.strip()
+        is_comment = False
+        if c_block:
+            is_comment = True
+            if "*/" in s: c_block = False
+        elif lua_close is not None:
+            is_comment = True
+            if lua_close in s: lua_close = None
+        elif s.startswith("/*"):
+            is_comment = True
+            if "*/" not in s: c_block = True
+        elif ext in DASH and s.startswith("--"):
+            is_comment = True
+            m = re.match(r"--\[(=*)\[", s)
+            if m:
+                close = "]" + "=" * len(m.group(1)) + "]"
+                if close not in s[m.end():]: lua_close = close
+        elif s.startswith(("//", "#")):
+            is_comment = True
+        if is_comment and s:
+            run += 1; mx = max(mx, run)
+            if EMDASH in s or EMOJI.search(s): bad.append(s)
+        else:
+            run = 0
+    return mx, bad
+
+# Judging new against old keeps this to one pass: shortening a comment never
+# trips the shorter-comment advice, and untouched comments never nag.
+mx, bad = scan(collect("new_string", "content"))
+mx_old, bad_old = scan(collect("old_string"))
+bad = [b for b in bad if b not in bad_old]
+
+def emit(msg, note):
+    print(json.dumps({
+        "systemMessage": msg,
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse", "additionalContext": note}}))
+
 if bad:
     kinds = []
     if any(EMDASH in b for b in bad): kinds.append("em dashes")
@@ -669,17 +687,18 @@ if bad:
                    "parentheses, or two sentences, and delete emoji outright. "
                    "Change only the comment text, not the surrounding code."),
         "systemMessage": f"vibe: {' + '.join(kinds)} in {base} comments - blocked"}))
-    sys.exit(0)
-if mx > 2:
-    note = (f"vibe reminder: this change wrote a {mx}-line comment block in "
-            f"{base}. Personal Rules cap comments at 2 lines. "
-            "If you just added it, trim to <=2 lines or drop it when the code is "
-            "self-explanatory; ignore this if the comment was pre-existing and "
-            "you did not touch it.")
-    print(json.dumps({
-        "systemMessage": f"vibe: {mx}-line comment in {base} (2-line max) - review it",
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse", "additionalContext": note}}))
+elif mx >= 3 and mx > mx_old:
+    emit(f"vibe: {mx}-line comment in {base} - trim it to 2 or fewer",
+         (f"This change wrote a {mx}-line comment block in {base}. Personal Rules cap "
+          "comments at 2 lines and prefer one, or none at all. Trim it to a single "
+          "line if the why still fits, two at the absolute most. Keep it longer only "
+          "if shortening would genuinely lose something, and say why if you do."))
+elif mx == 2 and mx > mx_old:
+    emit(f"vibe: 2-line comment in {base} - condense to 1 if you can",
+         (f"This change wrote a 2-line comment in {base}. Personal Rules prefer no "
+          "comment at all, and a single line where one earns its place. Condense it "
+          "to one line if the meaning survives; keep both lines only when condensing "
+          "would drop something that matters."))
 sys.exit(0)
 PY
 
