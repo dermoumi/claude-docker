@@ -577,14 +577,25 @@ cat > "$HOOKS_DIR/comment_guard.py" <<'PY'
 import sys, json, os, re
 CODE = {".js", ".jsx", ".ts", ".tsx", ".py", ".go", ".rs", ".c", ".h", ".cc",
         ".cpp", ".hpp", ".java", ".rb", ".php", ".swift", ".kt", ".scala",
-        ".sh", ".bash", ".zsh", ".pl", ".lua", ".sql", ".vue", ".svelte"}
+        ".sh", ".bash", ".zsh", ".pl", ".lua", ".sql", ".vue", ".svelte",
+        ".yml", ".yaml", ".toml", ".tf", ".hcl", ".nix", ".gradle", ".cmake"}
+NAMES = {"dockerfile", "makefile", "justfile", "vagrantfile", "rakefile"}
+DASH = {".lua", ".sql", ".hs", ".elm", ".ada"}  # -- comments; not YAML's ---
+EMDASH = "\u2014"
+EMOJI = re.compile("["
+                   "\U0001F000-\U0001FAFF"  # pictographs, emoticons, flags
+                   "\u2600-\u27BF"          # misc symbols, dingbats
+                   "\u2B00-\u2BFF"          # arrows and stars
+                   "\uFE0F\u200D]")         # emoji presentation, ZWJ
 try:
     data = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
 ti = data.get("tool_input") or {}
 path = ti.get("file_path") or ""
-if os.path.splitext(path)[1].lower() not in CODE:
+base = os.path.basename(path)
+ext = os.path.splitext(path)[1].lower()
+if ext not in CODE and base.lower().split(".")[0] not in NAMES:
     sys.exit(0)
 parts = []
 if isinstance(ti.get("new_string"), str): parts.append(ti["new_string"])
@@ -593,6 +604,7 @@ for e in ti.get("edits") or []:
     if isinstance(e, dict) and isinstance(e.get("new_string"), str):
         parts.append(e["new_string"])
 run = mx = 0
+bad = []
 c_block = False
 lua_close = None  # e.g. "]]" or "]=]" while inside a Lua --[[ ... ]] comment
 for ln in "\n".join(parts).split("\n"):
@@ -607,7 +619,7 @@ for ln in "\n".join(parts).split("\n"):
     elif s.startswith("/*"):
         is_comment = True
         if "*/" not in s: c_block = True
-    elif s.startswith("--"):
+    elif ext in DASH and s.startswith("--"):
         is_comment = True
         m = re.match(r"--\[(=*)\[", s)
         if m:
@@ -617,17 +629,31 @@ for ln in "\n".join(parts).split("\n"):
         is_comment = True
     if is_comment and s:
         run += 1; mx = max(mx, run)
+        if EMDASH in s or EMOJI.search(s): bad.append(s)
     else:
         run = 0
+if bad:
+    kinds = []
+    if any(EMDASH in b for b in bad): kinds.append("em dashes")
+    if any(EMOJI.search(b) for b in bad): kinds.append("emoji")
+    listed = "\n".join("    " + b[:80] for b in bad[:5])
+    print(json.dumps({
+        "decision": "block",
+        "reason": (f"Personal Rules forbid {' and '.join(kinds)} in comments, and "
+                   f"{base} now has {len(bad)}:\n{listed}\n"
+                   "Edit those lines again: replace an em dash with a colon, comma, "
+                   "parentheses, or two sentences, and delete emoji outright. "
+                   "Change only the comment text, not the surrounding code."),
+        "systemMessage": f"vibe: {' + '.join(kinds)} in {base} comments - blocked"}))
+    sys.exit(0)
 if mx > 2:
-    base = os.path.basename(path)
     note = (f"vibe reminder: this change wrote a {mx}-line comment block in "
             f"{base}. Personal Rules cap comments at 2 lines. "
             "If you just added it, trim to <=2 lines or drop it when the code is "
             "self-explanatory; ignore this if the comment was pre-existing and "
             "you did not touch it.")
     print(json.dumps({
-        "systemMessage": f"vibe: {mx}-line comment in {base} (2-line max) — review it",
+        "systemMessage": f"vibe: {mx}-line comment in {base} (2-line max) - review it",
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse", "additionalContext": note}}))
 sys.exit(0)
