@@ -73,6 +73,15 @@ if [[ "${1:-}" == "--serve" ]]; then
   exit 0
 fi
 
+SSH_USER="devbox"
+while getopts "u:" opt; do
+  case $opt in
+    u) SSH_USER="$OPTARG";;
+    *) echo "Usage: devbox [-u user] [ssh args...]" >&2; exit 1;;
+  esac
+done
+shift $((OPTIND - 1))
+
 command -v socat &>/dev/null || { echo "devbox: socat is required" >&2; exit 1; }
 [[ -n "$(detect_clip)" ]] || \
   echo "devbox: no clipboard tool (wl-paste/xclip/pbpaste); paste will be unavailable" >&2
@@ -85,4 +94,4 @@ trap 'kill "$SERVE_PID" 2>/dev/null; rm -f "$LOCAL_SOCK"' EXIT
 
 # kitten ssh (via ssht) shares connections, and a reused master drops new -R
 # forwards; ControlPath=none forces a private connection so the socket binds.
-ssht -o ControlPath=none -R "${REMOTE_SOCK}:${LOCAL_SOCK}" "$@" devbox
+ssht -o ControlPath=none -R "${REMOTE_SOCK}:${LOCAL_SOCK}" "$@" "$SSH_USER"
