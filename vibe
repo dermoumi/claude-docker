@@ -32,6 +32,7 @@ QUERY_PROMPT=""
 PARENT_DIR=""
 PERMISSION_MODE="bypassPermissions"
 REMOVE_ON_EXIT=0
+PROFILE=""
 
 usage() {
   cat <<'EOF'
@@ -51,13 +52,16 @@ Flags:
   -Q P  Like -q but isolated: only login credentials mounted, no sockets, and a
         throwaway container so it can run alongside an existing one
   -r    Remove the container on exit instead of keeping it for reuse
+  -u P  Use the Claude profile P: its own login, settings and rules, kept in
+        ~/.vibe/profiles/P instead of ~/.claude. A project can set its own
+        default in .claude/.vibe-profile; -u overrides it
   -x    Tear down the container and exit
 EOF
   exit 0
 }
 
 # Parse flags
-while getopts "abBDgGhpP:Q:q:rx" opt; do
+while getopts "abBDgGhpP:Q:q:ru:x" opt; do
   case $opt in
     a) PERMISSION_MODE="auto";;
     b) BUILD=1;;
@@ -71,11 +75,61 @@ while getopts "abBDgGhpP:Q:q:rx" opt; do
     q) QUERY=1; QUERY_PROMPT="$OPTARG";;
     Q) ISOLATED=1; QUERY_PROMPT="$OPTARG";;
     r) REMOVE_ON_EXIT=1;;
+    u) PROFILE="$OPTARG";;
     x) DOWN=1;;
     *) usage;;
   esac
 done
 shift $((OPTIND - 1))
+
+VIBE_HOME="${HOME}/.vibe"
+
+# One-time move of vibe's own config from the directory it used before ~/.vibe
+LEGACY_HOME="${HOME}/.claude-docker"
+if [[ -d "$LEGACY_HOME" ]]; then
+  mkdir -p "$VIBE_HOME"
+  for f in rules.md on_build.sh .no-socat-warning; do
+    if [[ -e "$LEGACY_HOME/$f" && ! -e "$VIBE_HOME/$f" ]]; then
+      mv "$LEGACY_HOME/$f" "$VIBE_HOME/$f"
+      echo "Moved ${LEGACY_HOME}/${f} to ${VIBE_HOME}/${f}" >&2
+    fi
+  done
+  rmdir "$LEGACY_HOME" 2>/dev/null || true
+fi
+
+# A profile name becomes a path segment and a container name segment
+valid_profile() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; }
+if [[ -n "$PROFILE" ]] && ! valid_profile "$PROFILE"; then
+  echo "Error: profile '$PROFILE' must be alphanumeric (-_ allowed)" >&2
+  exit 1
+fi
+
+# A project picks its own default profile; -u overrides it. Blank means default.
+read_project_profile() {
+  local file="$1" name
+  [[ -z "$PROFILE" && -f "$file" ]] || return 0
+  name="$(head -n1 "$file" | tr -d '[:space:]')"
+  [[ -n "$name" ]] || return 0
+  if ! valid_profile "$name"; then
+    echo "Error: $file names an invalid profile '$name'" >&2
+    exit 1
+  fi
+  PROFILE="$name"
+}
+
+# The default profile is the host's own claude home, so vibe keeps sharing its
+# login with a host-installed claude; named ones are self-contained under ~/.vibe.
+set_profile_paths() {
+  if [[ -n "$PROFILE" ]]; then
+    CLAUDE_HOME="${VIBE_HOME}/profiles/${PROFILE}/claude"
+    CLAUDE_JSON="${VIBE_HOME}/profiles/${PROFILE}/claude.json"
+    CLAUDE_STATE="${VIBE_HOME}/profiles/${PROFILE}/state"
+  else
+    CLAUDE_HOME="${HOME}/.claude"
+    CLAUDE_JSON="${HOME}/.claude.json"
+    CLAUDE_STATE="${HOME}/.local/state/claude"
+  fi
+}
 
 # Image build definitions, hoisted so an isolated query (-Q) can build the
 # base image before any project or socket setup runs below.
@@ -317,8 +371,8 @@ if ((ISOLATED)); then
   if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     build_image >&2
   fi
-  CLAUDE_HOME="${HOME}/.claude"
-  CLAUDE_JSON="${HOME}/.claude.json"
+  read_project_profile "$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/.vibe-profile"
+  set_profile_paths
   mkdir -p "$CLAUDE_HOME"
   [[ -f "$CLAUDE_JSON" ]] || echo '{}' > "$CLAUDE_JSON"
   exec docker run --rm \
@@ -433,9 +487,12 @@ elif ! ((VIBE_DIR_EXISTED)); then
 fi
 export VIBE_DIR
 
-# Rules, hooks and settings live in the global claude home so vibe leaves no
-# footprint in the project (a third-party repo may ship its own .claude/).
-CLAUDE_HOME="${HOME}/.claude"
+read_project_profile "$VIBE_DIR/.vibe-profile"
+set_profile_paths
+
+# Rules, hooks and settings live in the claude home so vibe leaves no footprint
+# in the project (a third-party repo may ship its own .claude/). Whichever home
+# the profile picked, the container always sees it as /home/dev/.claude.
 mkdir -p "$CLAUDE_HOME"
 export CLAUDE_HOME
 
@@ -476,7 +533,7 @@ read -r -d '' DEFAULT_RULES <<'RULES' || true
 - Only push task branches, as `git push [-u] origin <branch>`. Never push to main/master; every other push form is blocked.
 RULES
 
-RULES_FILE="$HOME/.claude-docker/rules.md"
+RULES_FILE="$VIBE_HOME/rules.md"
 if [[ -f "$RULES_FILE" ]]; then
   RULES_CONTENT="$(cat "$RULES_FILE")"
   if echo "$RULES_CONTENT" | grep -q '^##'; then
@@ -796,14 +853,14 @@ PY
 sanitize() { echo "$1" | tr -cd "a-zA-Z0-9-"; }
 
 # Base docker arguments
-DIR_HASH="$(echo -n "$TARGET_DIR" | md5sum | cut -c1-4)"
+DIR_HASH="$(echo -n "${TARGET_DIR}${PROFILE}" | md5sum | cut -c1-4)"
 DIR_BASENAME="$(sanitize "$(basename "$TARGET_DIR")")"
 
 # Set terminal/tmux window name early (before slow docker run)
 if [[ -n "$WORKTREE_BRANCH" ]]; then
-  WINDOW_TITLE="w:${DIR_BASENAME}:${WORKTREE_BRANCH}"
+  WINDOW_TITLE="w:${DIR_BASENAME}:${WORKTREE_BRANCH}${PROFILE:+@$PROFILE}"
 else
-  WINDOW_TITLE="v:${DIR_BASENAME}"
+  WINDOW_TITLE="v:${DIR_BASENAME}${PROFILE:+@$PROFILE}"
 fi
 TMUX_WINDOW=""
 if ((QUERY)); then
@@ -820,9 +877,9 @@ fi
 # For worktrees, include the branch name (DIR_BASENAME is already the repo name)
 if [[ -n "$WORKTREE" ]]; then
   BRANCH_BASENAME="$(sanitize "$WORKTREE_BRANCH")"
-  PROJECT_NAME="vibe-${DIR_BASENAME}-${BRANCH_BASENAME}-${DIR_HASH}"
+  PROJECT_NAME="vibe-${DIR_BASENAME}-${BRANCH_BASENAME}${PROFILE:+-$PROFILE}-${DIR_HASH}"
 else
-  PROJECT_NAME="vibe-${DIR_BASENAME}-${DIR_HASH}"
+  PROJECT_NAME="vibe-${DIR_BASENAME}${PROFILE:+-$PROFILE}-${DIR_HASH}"
 fi
 
 PROJECT_NAME="$(tolower "$PROJECT_NAME")"
@@ -996,13 +1053,12 @@ export BROWSER_FIFO CLIPBOARD_FIFO CLIPBOARD_RESP_DIR
 
 
 # Check if the user has an on_build.sh script in ~/.vibe
-ON_BUILD_SCRIPT="$HOME/.claude-docker/on_build.sh"
+ON_BUILD_SCRIPT="$VIBE_HOME/on_build.sh"
 if [[ -f "$ON_BUILD_SCRIPT" ]]; then
   ON_BUILD="$(cat "$ON_BUILD_SCRIPT")"
   export ON_BUILD
 fi
 
-CLAUDE_STATE="${HOME}/.local/state/claude"
 CLAUDE_PROJECTS="${VIBE_DIR}/.projects"
 mkdir -p "$CLAUDE_HOME" "$CLAUDE_STATE" "$CLAUDE_PROJECTS"
 
@@ -1029,7 +1085,6 @@ if [[ -n "${WORKTREE_REL:-}" ]]; then
   fi
 fi
 
-CLAUDE_JSON="${HOME}/.claude.json"
 if [[ ! -f "$CLAUDE_JSON" ]]; then
   echo '{}' > "$CLAUDE_JSON"
 fi
@@ -1200,14 +1255,14 @@ if command -v socat &>/dev/null; then
   ) &
   PORT_WATCHER_PID=$!
   disown
-elif [[ ! -f "$HOME/.claude-docker/.no-socat-warning" ]]; then
+elif [[ ! -f "$VIBE_HOME/.no-socat-warning" ]]; then
   echo "Warning: 'socat' is not installed. OAuth login callback won't work." >&2
   if ! ((QUERY)); then
     echo "Install it with your package manager (e.g. sudo pacman -S socat)." >&2
     read -rp "Continue? [Y/n/never] " ans
     case "$(tolower "$ans")" in
       n|no) exit 1 ;;
-      never) mkdir -p "$HOME/.claude-docker" && touch "$HOME/.claude-docker/.no-socat-warning" ;;
+      never) mkdir -p "$VIBE_HOME" && touch "$VIBE_HOME/.no-socat-warning" ;;
     esac
   fi
 fi
