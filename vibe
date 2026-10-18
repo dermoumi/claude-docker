@@ -254,8 +254,12 @@ if [[ -d /tmp/clipboard_queue ]]; then
   IPC=queue
 elif [[ -p /tmp/clipboard_fifo ]]; then
   IPC=fifo
+elif [[ -S /tmp/agent-relay/clip.sock ]]; then
+  IPC=socket
+  SOCK=/tmp/agent-relay/clip.sock
 elif [[ -S /tmp/clip.sock ]]; then
   IPC=socket
+  SOCK=/tmp/clip.sock
 fi
 TYPE="image/png"
 IS_READ=0
@@ -280,7 +284,7 @@ else
   REQ="$TYPE"
 fi
 if [[ "$IPC" == "socket" ]]; then
-  printf "%s\n" "$REQ" | socat -t 30 - UNIX-CONNECT:/tmp/clip.sock 2>/dev/null
+  printf "%s\n" "$REQ" | socat -t 30 - "UNIX-CONNECT:$SOCK" 2>/dev/null
   exit $?
 fi
 if [[ "$IPC" == "queue" ]]; then
@@ -953,12 +957,16 @@ fi
 SSH_RELAY_PORT=""
 GPG_RELAY_PORT=""
 AGENT_RELAY_DIR=""
+# Clipboard socket forwarded from a client by the `devbox` launcher (ssh -R).
+# Recreated with a new inode on every reconnect, so it is relayed too.
+CLIP_FWD_SOCK="/tmp/vibe-clip.sock"
 # Session-scoped pid file: overlapping sessions of the same project must not
 # kill each other's relays/forwards on exit.
 SOCAT_PIDFILE="/tmp/.vibe-socat-pids-${PROJECT_NAME}-$$"
 if command -v socat &>/dev/null; then
   have_ssh_sock() { [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; }
   have_gpg_sock() { [[ -n "${GNUPG_SOCK:-}" && -S "$GNUPG_SOCK" ]]; }
+  have_clip_sock() { [[ -S "$CLIP_FWD_SOCK" ]]; }
   if ((IS_MACOS)); then
     if have_ssh_sock; then
       SSH_RELAY_PORT=$(free_port)
@@ -972,7 +980,7 @@ if command -v socat &>/dev/null; then
         "UNIX-CONNECT:${GNUPG_SOCK}" 2>/dev/null &
       echo "$! gpg-relay" >> "$SOCAT_PIDFILE"
     fi
-  elif have_ssh_sock || have_gpg_sock; then
+  elif have_ssh_sock || have_gpg_sock || have_clip_sock; then
     AGENT_RELAY_DIR="/tmp/.vibe-agent-${PROJECT_NAME}"
     mkdir -m 700 -p "$AGENT_RELAY_DIR"
     # A live relay from an overlapping session already serves the socket; a stale
@@ -991,6 +999,13 @@ if command -v socat &>/dev/null; then
       socat "UNIX-LISTEN:${AGENT_RELAY_DIR}/gpg.sock,fork,mode=666" \
         "UNIX-CONNECT:${GNUPG_SOCK}" 2>/dev/null &
       echo "$! gpg-relay" >> "$SOCAT_PIDFILE"
+    fi
+    # -t 30: the far end reads the host clipboard over ssh, which outlasts
+    # socat's default half-close timeout and would truncate the response.
+    if have_clip_sock && relay_needed "${AGENT_RELAY_DIR}/clip.sock"; then
+      socat -t 30 "UNIX-LISTEN:${AGENT_RELAY_DIR}/clip.sock,fork,mode=666" \
+        "UNIX-CONNECT:${CLIP_FWD_SOCK}" 2>/dev/null &
+      echo "$! clip-relay" >> "$SOCAT_PIDFILE"
     fi
   fi
 fi
@@ -1153,9 +1168,9 @@ if ! ((IS_MACOS)); then
   add_host_mount "${BROWSER_FIFO:-}" /tmp/browser_fifo
   add_host_mount "${CLIPBOARD_FIFO:-}" /tmp/clipboard_fifo
   add_host_mount "${CLIPBOARD_RESP_DIR:-}" /tmp/clipboard_resp
-  # Clipboard socket forwarded from a client by the `devbox` launcher (ssh -R).
-  # Auto-skipped when absent, i.e. for local (non-remote) vibe sessions.
-  add_host_mount /tmp/vibe-clip.sock /tmp/clip.sock
+  # Fallback for the forwarded clipboard socket when no relay runs: a direct
+  # bind goes stale on reconnect. Auto-skipped for local (non-remote) sessions.
+  [[ -n "$AGENT_RELAY_DIR" ]] || add_host_mount "$CLIP_FWD_SOCK" /tmp/clip.sock
 fi
 if [[ -n "$WORKTREE" ]]; then
   VOLUMES+=(-v "$TARGET_DIR/.git:$TARGET_DIR/.git")
