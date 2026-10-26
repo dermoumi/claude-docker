@@ -947,9 +947,10 @@ fi
 # Bridge the SSH/GPG agent sockets through a socat relay instead of bind-mounting
 # them directly. A bind mount pins the socket's inode at container-creation time,
 # so it goes stale when the forwarded agent is replaced (e.g. after an SSH
-# reconnect). socat's `fork` re-resolves SSH_AUTH_SOCK/GNUPG_SOCK on every new
-# connection, so a stable agent path (as ssht keeps it) always reaches the live
-# agent without recreating the container.
+# reconnect). socat's `fork` re-resolves the target path on every connection, so
+# the live agent is reached without recreating the container. That target is a
+# symlink the next session re-points, so an agent path that changes between
+# logins cannot leave a relay bound to a socket that is gone.
 #
 # macOS uses a TCP relay (VirtioFS unix-socket forwarding is unreliable). Linux
 # uses a unix-socket relay in a mode-700 mktemp dir bind-mounted into the
@@ -980,7 +981,9 @@ if command -v socat &>/dev/null; then
         "UNIX-CONNECT:${GNUPG_SOCK}" 2>/dev/null &
       echo "$! gpg-relay" >> "$SOCAT_PIDFILE"
     fi
-  elif have_ssh_sock || have_gpg_sock || have_clip_sock; then
+  else
+    # Set up even with nothing to relay yet: mounts are fixed at container
+    # creation, so skipping it leaves that container agentless for good.
     AGENT_RELAY_DIR="/tmp/.vibe-agent-${PROJECT_NAME}"
     mkdir -m 700 -p "$AGENT_RELAY_DIR"
     # A live relay from an overlapping session already serves the socket; a stale
@@ -990,22 +993,27 @@ if command -v socat &>/dev/null; then
       socat -u /dev/null "UNIX-CONNECT:$1" &>/dev/null && return 1
       rm -f "$1"
     }
-    if have_ssh_sock && relay_needed "${AGENT_RELAY_DIR}/ssh.sock"; then
-      socat "UNIX-LISTEN:${AGENT_RELAY_DIR}/ssh.sock,fork,mode=666" \
-        "UNIX-CONNECT:${SSH_AUTH_SOCK}" 2>/dev/null &
-      echo "$! ssh-relay" >> "$SOCAT_PIDFILE"
+    # Re-points the target first, so a relay inherited from an earlier session
+    # follows the live socket: its accept succeeds however dead the far side is.
+    start_relay() {
+      local name="$1" target="$2"
+      shift 2
+      ln -sfn "$target" "${AGENT_RELAY_DIR}/${name}.target"
+      relay_needed "${AGENT_RELAY_DIR}/${name}.sock" || return 0
+      socat "$@" "UNIX-LISTEN:${AGENT_RELAY_DIR}/${name}.sock,fork,mode=666" \
+        "UNIX-CONNECT:${AGENT_RELAY_DIR}/${name}.target" 2>/dev/null &
+      echo "$! ${name}-relay" >> "$SOCAT_PIDFILE"
+    }
+    if have_ssh_sock; then
+      start_relay ssh "$SSH_AUTH_SOCK"
     fi
-    if have_gpg_sock && relay_needed "${AGENT_RELAY_DIR}/gpg.sock"; then
-      socat "UNIX-LISTEN:${AGENT_RELAY_DIR}/gpg.sock,fork,mode=666" \
-        "UNIX-CONNECT:${GNUPG_SOCK}" 2>/dev/null &
-      echo "$! gpg-relay" >> "$SOCAT_PIDFILE"
+    if have_gpg_sock; then
+      start_relay gpg "$GNUPG_SOCK"
     fi
     # -t 30: the far end reads the host clipboard over ssh, which outlasts
     # socat's default half-close timeout and would truncate the response.
-    if have_clip_sock && relay_needed "${AGENT_RELAY_DIR}/clip.sock"; then
-      socat -t 30 "UNIX-LISTEN:${AGENT_RELAY_DIR}/clip.sock,fork,mode=666" \
-        "UNIX-CONNECT:${CLIP_FWD_SOCK}" 2>/dev/null &
-      echo "$! clip-relay" >> "$SOCAT_PIDFILE"
+    if have_clip_sock; then
+      start_relay clip "$CLIP_FWD_SOCK" -t 30
     fi
   fi
 fi
@@ -1158,7 +1166,8 @@ if ! ((IS_MACOS)); then
     VOLUMES+=(-v "$real:$dest")
   }
   if [[ -n "$AGENT_RELAY_DIR" ]]; then
-    # Preferred path: the socat relay dir survives agent churn across reconnects.
+    # Preferred path: the socat relay dir survives agent churn across reconnects,
+    # and is mounted whether or not a socket is being relayed right now.
     VOLUMES+=(-v "$AGENT_RELAY_DIR:/tmp/agent-relay")
   else
     # Fall back to bind-mounting the sockets directly (socat unavailable).
