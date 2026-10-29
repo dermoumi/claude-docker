@@ -29,7 +29,7 @@ GITIGNORE_OFF=0
 QUERY=0
 ISOLATED=0
 QUERY_PROMPT=""
-PARENT_DIR=""
+MOUNT_DIRS=()
 PERMISSION_MODE="bypassPermissions"
 REMOVE_ON_EXIT=0
 PROFILE=""
@@ -46,8 +46,8 @@ Flags:
   -g    Force .claude/.gitignore on (add '*' entry)
   -G    Force .claude/.gitignore off (remove '*' entry)
   -h    Show this help message
-  -p    Shorthand for -P .. (mount the parent of the current directory)
-  -P    Mount parent directory read-only for sibling repo access
+  -p    Shorthand for -P .. (mount parent directory)
+  -P D  Mount directory D read-only at /mount/<basename> (repeatable)
   -q P  Query one-off: run prompt P non-interactively, print result to stdout
   -Q P  Like -q but isolated: only login credentials mounted, no sockets, and a
         throwaway container so it can run alongside an existing one
@@ -70,8 +70,8 @@ while getopts "abBDgGhpP:Q:q:ru:x" opt; do
     g) GITIGNORE_ON=1;;
     G) GITIGNORE_OFF=1;;
     h) usage;;
-    p) PARENT_DIR="$(realpath -- ..)";;
-    P) PARENT_DIR="$(realpath -- "$OPTARG")";;
+    p) MOUNT_DIRS+=("$(realpath -- ..)");;
+    P) MOUNT_DIRS+=("$(realpath -- "$OPTARG")");;
     q) QUERY=1; QUERY_PROMPT="$OPTARG";;
     Q) ISOLATED=1; QUERY_PROMPT="$OPTARG";;
     r) REMOVE_ON_EXIT=1;;
@@ -456,16 +456,12 @@ if [[ ! -d "$TARGET_DIR" ]]; then
 fi
 export TARGET_DIR
 
-if [[ -n "$PARENT_DIR" ]]; then
-  if [[ ! -d "$PARENT_DIR" ]]; then
-    echo "Error: parent directory '$PARENT_DIR' does not exist" >&2
+for _md in "${MOUNT_DIRS[@]}"; do
+  if [[ ! -d "$_md" ]]; then
+    echo "Error: mount directory '$_md' does not exist" >&2
     exit 1
   fi
-  case "$TARGET_DIR" in
-    "$PARENT_DIR"/*) ;;
-    *) echo "Error: '$TARGET_DIR' is not inside '$PARENT_DIR'" >&2; exit 1;;
-  esac
-fi
+done
 
 # Ensure .claude/ exists and mount it
 if [[ -n "$WORKTREE" ]]; then
@@ -1185,9 +1181,9 @@ if [[ -n "$WORKTREE" ]]; then
   VOLUMES+=(-v "$TARGET_DIR/.git:$TARGET_DIR/.git")
   VOLUMES+=(-v "$TARGET_DIR/$WORKTREE_REL:$TARGET_DIR/$WORKTREE_REL")
 fi
-if [[ -n "$PARENT_DIR" ]]; then
-  VOLUMES+=(-v "$PARENT_DIR:/repos:ro")
-fi
+for _md in "${MOUNT_DIRS[@]}"; do
+  VOLUMES+=(-v "$_md:/mount/$(basename "$_md"):ro")
+done
 
 remove_container() {
   docker rm -f "$CONTAINER_NAME" &>/dev/null || true
@@ -1527,8 +1523,10 @@ fi
 
 SYSTEM_PROMPT+="Memory is shared across concurrent sessions: agents in other worktrees or parallel sessions may write memory files and MEMORY.md at the same time as you. After saving or editing a memory, re-read the file to verify your change landed intact — re-apply it if a concurrent write clobbered it — before moving on to the next step."$'\n\n'
 
-if [[ -n "$PARENT_DIR" ]]; then
-  SYSTEM_PROMPT+="Sibling repos available read-only at /repos/. Working project: $(realpath --relative-to="$PARENT_DIR" "$TARGET_DIR")."$'\n'
+if [[ ${#MOUNT_DIRS[@]} -gt 0 ]]; then
+  _names=()
+  for _md in "${MOUNT_DIRS[@]}"; do _names+=("/mount/$(basename "$_md")"); done
+  SYSTEM_PROMPT+="Read-only host directories mounted at: $(IFS=', '; echo "${_names[*]}")."$'\n'
 fi
 
 TOOL_FLAGS=(--permission-mode "$PERMISSION_MODE" --allow-dangerously-skip-permissions)
