@@ -1317,6 +1317,36 @@ elif [[ ! -f "$VIBE_HOME/.no-socat-warning" ]]; then
   fi
 fi
 
+# The entrypoint imports the public keys once per launch, from the snapshot
+# taken above. When the agent was unreachable then (a forward still down after
+# a reattach), the keyring stays empty for the whole session and signing fails
+# with "No secret key" even once the agent is back. Retry until it answers, so
+# recovering no longer means restarting vibe.
+GPG_WATCHER_PID=""
+if [[ -n "${GNUPG_SOCK:-}" && -z "${GPG_PUBKEYS:-}" ]]; then
+  (
+    while sleep 15; do
+      CID="$(get_container_id 2>/dev/null)" || continue
+      [[ -n "$CID" ]] || continue
+      KEYS="$(with_timeout 5 gpg --no-autostart --list-secret-keys --with-colons 2>/dev/null)" || continue
+      KEYS="$(awk -F: '/^sec/{print $5}' <<<"$KEYS")"
+      [[ -n "$KEYS" ]] || continue
+      KEYS="$(with_timeout 5 gpg --no-autostart --export -a $KEYS 2>/dev/null)" || continue
+      [[ -n "$KEYS" ]] || continue
+      # Mirrors the entrypoint's import, keyboxd restarts included.
+      printf '%s\n' "$KEYS" | docker exec -i "$CID" bash -c '
+        gpgconf --kill keyboxd 2>/dev/null || true
+        gpg --batch --no-autostart --import 2>/dev/null || exit 1
+        gpg --batch --no-autostart --list-keys --with-colons 2>/dev/null \
+          | awk -F: "/^fpr:/{print \$10\":6:\"}" \
+          | gpg --batch --no-autostart --import-ownertrust 2>/dev/null || true
+        gpgconf --kill keyboxd 2>/dev/null || true' && break
+    done
+  ) &
+  GPG_WATCHER_PID=$!
+  disown
+fi
+
 PBPASTE_IMG_CACHE=""
 
 # Read host clipboard content
@@ -1475,6 +1505,9 @@ cleanup() {
   fi
   if [[ -n "$PORT_WATCHER_PID" ]]; then
     kill "$PORT_WATCHER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${GPG_WATCHER_PID:-}" ]]; then
+    kill "$GPG_WATCHER_PID" 2>/dev/null || true
   fi
   # Kill only this session's relays/forwards; a newer session for the same
   # project may still be running its own.
