@@ -929,14 +929,44 @@ if ((DOWN)); then
   exit 0
 fi
 
+# Bound a command instead of trusting the socket: a forwarded agent whose far end
+# is gone still accepts, so a gpg call through it blocks until its TCP timeout.
+# Pass a plain command, never a function or pipeline: its own children would
+# survive the kill and hold this stdout open, defeating the timeout.
+with_timeout() {
+  local secs="$1" pid waiter rc=0
+  shift
+  "$@" &
+  pid=$!
+  # Redirected, or the waiter itself holds the caller's stdout open.
+  ( sleep "$secs"; kill "$pid" ) >/dev/null 2>&1 &
+  waiter=$!
+  wait "$pid" 2>/dev/null || rc=$?
+  kill "$waiter" &>/dev/null || true
+  # Report a kill by the waiter the way GNU timeout does.
+  if ((rc == 143)); then rc=124; fi
+  return "$rc"
+}
+
 # Setup the GPG extra socket.
 # The extra socket is more restricted than the normal socket
 if command -v gpgconf &>/dev/null; then
   GNUPG_SOCK=$(gpgconf --list-dir agent-extra-socket)
   if [[ -S "$GNUPG_SOCK" ]]; then
     export GNUPG_SOCK
-    GPG_PUBKEYS=$(gpg --export -a $(gpg --list-secret-keys --with-colons 2>/dev/null | awk -F: '/^sec/{print $5}') 2>/dev/null)
-    export GPG_PUBKEYS
+    # Secret-key listing goes through the agent, so it is the call that hangs.
+    # --no-autostart: an agent started here would take the forwarded socket's
+    # path and shadow it with an empty one, which only fails at signing time.
+    SEC_KEYS=$(with_timeout 5 gpg --no-autostart --list-secret-keys --with-colons 2>/dev/null) && rc=0 || rc=$?
+    SEC_KEYS=$(awk -F: '/^sec/{print $5}' <<<"$SEC_KEYS")
+    if ((rc == 124)); then
+      echo "vibe: gpg agent at $GNUPG_SOCK is not answering, continuing without GPG keys" >&2
+    elif [[ -z "$SEC_KEYS" ]]; then
+      echo "vibe: gpg agent at $GNUPG_SOCK holds no secret keys (a local agent may be shadowing the forward); signing will fail" >&2
+    else
+      GPG_PUBKEYS=$(with_timeout 5 gpg --no-autostart --export -a $SEC_KEYS 2>/dev/null) || true
+      export GPG_PUBKEYS
+    fi
   fi
 fi
 
