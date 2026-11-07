@@ -65,6 +65,8 @@ EOF
 add_mount() {
   local name="" src="$1"
   [[ "$1" == *:* ]] && { name="${1%%:*}"; src="${1#*:}"; }
+  # The shell leaves ~ unexpanded after NAME:
+  [[ "$src" == "~" || "$src" == "~/"* ]] && src="$HOME${src:1}"
   src="$(realpath -- "$src")"
   MOUNT_DIRS+=("$src")
   MOUNT_NAMES+=("${name:-$(basename "$src")}")
