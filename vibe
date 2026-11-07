@@ -30,6 +30,7 @@ QUERY=0
 ISOLATED=0
 QUERY_PROMPT=""
 MOUNT_DIRS=()
+MOUNT_NAMES=()
 PERMISSION_MODE="bypassPermissions"
 REMOVE_ON_EXIT=0
 PROFILE=""
@@ -47,7 +48,8 @@ Flags:
   -G    Force .claude/.gitignore off (remove '*' entry)
   -h    Show this help message
   -p    Shorthand for -P .. (mount parent directory)
-  -P D  Mount directory D read-only at /mount/<basename> (repeatable)
+  -P D  Mount directory D read-only at /mount/<basename> (repeatable).
+        Use -P N:D to mount it at /mount/N instead
   -q P  Query one-off: run prompt P non-interactively, print result to stdout
   -Q P  Like -q but isolated: only login credentials mounted, no sockets, and a
         throwaway container so it can run alongside an existing one
@@ -60,6 +62,14 @@ EOF
   exit 0
 }
 
+add_mount() {
+  local name="" src="$1"
+  [[ "$1" == *:* ]] && { name="${1%%:*}"; src="${1#*:}"; }
+  src="$(realpath -- "$src")"
+  MOUNT_DIRS+=("$src")
+  MOUNT_NAMES+=("${name:-$(basename "$src")}")
+}
+
 # Parse flags
 while getopts "abBDgGhpP:Q:q:ru:x" opt; do
   case $opt in
@@ -70,8 +80,8 @@ while getopts "abBDgGhpP:Q:q:ru:x" opt; do
     g) GITIGNORE_ON=1;;
     G) GITIGNORE_OFF=1;;
     h) usage;;
-    p) MOUNT_DIRS+=("$(realpath -- ..)");;
-    P) MOUNT_DIRS+=("$(realpath -- "$OPTARG")");;
+    p) add_mount ..;;
+    P) add_mount "$OPTARG";;
     q) QUERY=1; QUERY_PROMPT="$OPTARG";;
     Q) ISOLATED=1; QUERY_PROMPT="$OPTARG";;
     r) REMOVE_ON_EXIT=1;;
@@ -456,11 +466,22 @@ if [[ ! -d "$TARGET_DIR" ]]; then
 fi
 export TARGET_DIR
 
-for _md in "${MOUNT_DIRS[@]}"; do
+for _i in "${!MOUNT_DIRS[@]}"; do
+  _md="${MOUNT_DIRS[$_i]}" _mn="${MOUNT_NAMES[$_i]}"
   if [[ ! -d "$_md" ]]; then
     echo "Error: mount directory '$_md' does not exist" >&2
     exit 1
   fi
+  if [[ "$_mn" == */* || "$_mn" == . || "$_mn" == .. ]]; then
+    echo "Error: invalid mount name '$_mn'" >&2
+    exit 1
+  fi
+  for _j in "${!MOUNT_NAMES[@]}"; do
+    if (( _j < _i )) && [[ "${MOUNT_NAMES[$_j]}" == "$_mn" ]]; then
+      echo "Error: two directories would mount at /mount/$_mn; name one with -P NAME:DIR" >&2
+      exit 1
+    fi
+  done
 done
 
 # Ensure .claude/ exists and mount it
@@ -1211,8 +1232,8 @@ if [[ -n "$WORKTREE" ]]; then
   VOLUMES+=(-v "$TARGET_DIR/.git:$TARGET_DIR/.git")
   VOLUMES+=(-v "$TARGET_DIR/$WORKTREE_REL:$TARGET_DIR/$WORKTREE_REL")
 fi
-for _md in "${MOUNT_DIRS[@]}"; do
-  VOLUMES+=(-v "$_md:/mount/$(basename "$_md"):ro")
+for _i in "${!MOUNT_DIRS[@]}"; do
+  VOLUMES+=(-v "${MOUNT_DIRS[$_i]}:/mount/${MOUNT_NAMES[$_i]}:ro")
 done
 
 remove_container() {
@@ -1587,8 +1608,7 @@ fi
 SYSTEM_PROMPT+="Memory is shared across concurrent sessions: agents in other worktrees or parallel sessions may write memory files and MEMORY.md at the same time as you. After saving or editing a memory, re-read the file to verify your change landed intact — re-apply it if a concurrent write clobbered it — before moving on to the next step."$'\n\n'
 
 if [[ ${#MOUNT_DIRS[@]} -gt 0 ]]; then
-  _names=()
-  for _md in "${MOUNT_DIRS[@]}"; do _names+=("/mount/$(basename "$_md")"); done
+  _names=("${MOUNT_NAMES[@]/#//mount/}")
   SYSTEM_PROMPT+="Read-only host directories mounted at: $(IFS=', '; echo "${_names[*]}")."$'\n'
 fi
 
