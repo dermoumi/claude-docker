@@ -30,7 +30,8 @@ QUERY=0
 ISOLATED=0
 QUERY_PROMPT=""
 MOUNT_DIRS=()
-MOUNT_NAMES=()
+MOUNT_TARGETS=()
+MOUNT_MODES=()
 SHARED_DIRS=()
 PERMISSION_MODE="bypassPermissions"
 REMOVE_ON_EXIT=0
@@ -49,8 +50,9 @@ Flags:
   -G    Force .claude/.gitignore off (remove '*' entry)
   -h    Show this help message
   -p    Shorthand for -P .. (mount parent directory)
-  -P D  Mount directory D read-only at /mount/<basename> (repeatable).
-        Use -P N:D to mount it at /mount/N instead
+  -P S  Mount host directory S read-only at /mount/<basename> (repeatable).
+        -P S:T mounts it at T (absolute, or relative to /mount); append :rw
+        to make it writable, as in -P S:rw or -P S:T:rw
   -q P  Query one-off: run prompt P non-interactively, print result to stdout
   -Q P  Like -q but isolated: only login credentials mounted, no sockets, and a
         throwaway container so it can run alongside an existing one
@@ -67,13 +69,17 @@ EOF
 }
 
 add_mount() {
-  local name="" src="$1"
-  [[ "$1" == *:* ]] && { name="${1%%:*}"; src="${1#*:}"; }
-  # The shell leaves ~ unexpanded after NAME:
+  local spec="$1" src target="" mode=ro
+  case "$spec" in *:ro|*:rw) mode="${spec##*:}"; spec="${spec%:*}";; esac
+  src="${spec%%:*}"
+  [[ "$spec" == *:* ]] && target="${spec#*:}"
   [[ "$src" == "~" || "$src" == "~/"* ]] && src="$HOME${src:1}"
   src="$(realpath -- "$src")"
+  while [[ "$target" == ?*/ ]]; do target="${target%/}"; done
+  [[ "$target" == /* ]] || target="/mount/${target:-$(basename "$src")}"
   MOUNT_DIRS+=("$src")
-  MOUNT_NAMES+=("${name:-$(basename "$src")}")
+  MOUNT_TARGETS+=("$target")
+  MOUNT_MODES+=("$mode")
 }
 
 # Parse flags
@@ -474,18 +480,19 @@ fi
 export TARGET_DIR
 
 for _i in "${!MOUNT_DIRS[@]}"; do
-  _md="${MOUNT_DIRS[$_i]}" _mn="${MOUNT_NAMES[$_i]}"
+  _md="${MOUNT_DIRS[$_i]}" _mt="${MOUNT_TARGETS[$_i]}"
   if [[ ! -d "$_md" ]]; then
     echo "Error: mount directory '$_md' does not exist" >&2
     exit 1
   fi
-  if [[ "$_mn" == */* || "$_mn" == . || "$_mn" == .. ]]; then
-    echo "Error: invalid mount name '$_mn'" >&2
-    exit 1
-  fi
-  for _j in "${!MOUNT_NAMES[@]}"; do
-    if (( _j < _i )) && [[ "${MOUNT_NAMES[$_j]}" == "$_mn" ]]; then
-      echo "Error: two directories would mount at /mount/$_mn; name one with -P NAME:DIR" >&2
+  case "$_mt/" in
+    *//*|*/./*|*/../*|*:*)
+      echo "Error: invalid mount target '$_mt'" >&2
+      exit 1;;
+  esac
+  for _j in "${!MOUNT_TARGETS[@]}"; do
+    if (( _j < _i )) && [[ "${MOUNT_TARGETS[$_j]}" == "$_mt" ]]; then
+      echo "Error: two directories would mount at $_mt; give one a target with -P SRC:TARGET" >&2
       exit 1
     fi
   done
@@ -1271,7 +1278,7 @@ if [[ -n "$WORKTREE" ]]; then
   done
 fi
 for _i in "${!MOUNT_DIRS[@]}"; do
-  VOLUMES+=(-v "${MOUNT_DIRS[$_i]}:/mount/${MOUNT_NAMES[$_i]}:ro")
+  VOLUMES+=(-v "${MOUNT_DIRS[$_i]}:${MOUNT_TARGETS[$_i]}:${MOUNT_MODES[$_i]}")
 done
 
 remove_container() {
@@ -1649,8 +1656,12 @@ fi
 SYSTEM_PROMPT+="Memory is shared across concurrent sessions: agents in other worktrees or parallel sessions may write memory files and MEMORY.md at the same time as you. After saving or editing a memory, re-read the file to verify your change landed intact — re-apply it if a concurrent write clobbered it — before moving on to the next step."$'\n\n'
 
 if [[ ${#MOUNT_DIRS[@]} -gt 0 ]]; then
-  _names=("${MOUNT_NAMES[@]/#//mount/}")
-  SYSTEM_PROMPT+="Read-only host directories mounted at: $(IFS=', '; echo "${_names[*]}")."$'\n'
+  _names=()
+  for _i in "${!MOUNT_DIRS[@]}"; do
+    _names+=("${MOUNT_TARGETS[$_i]} ($([[ ${MOUNT_MODES[$_i]} == rw ]] && echo read-write || echo read-only))")
+  done
+  _list="$(printf '%s, ' "${_names[@]}")"
+  SYSTEM_PROMPT+="Host directories mounted at: ${_list%, }."$'\n'
 fi
 
 TOOL_FLAGS=(--permission-mode "$PERMISSION_MODE" --allow-dangerously-skip-permissions)
