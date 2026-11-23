@@ -1702,8 +1702,11 @@ clear
 # Prompt to remove worktree if one was created. Dropping the worktree makes its
 # container useless, and the container must go first anyway to release the mount.
 if [[ -n "$WORKTREE" ]]; then
-  read -rp "Remove worktree '$WORKTREE_BRANCH'? [y/N] " answer
-  if [[ "$answer" == [yY] ]]; then
+  while read -rp "Type '$WORKTREE_BRANCH' to remove the worktree, or Enter to keep it: " answer \
+    && [[ -n "$answer" && "$answer" != "$WORKTREE_BRANCH" ]]; do
+    echo "Name does not match."
+  done
+  if [[ "$answer" == "$WORKTREE_BRANCH" ]]; then
     teardown_container
     git worktree remove "$WORKTREE" 2>/dev/null || rm -rf "$WORKTREE"
     echo "Worktree '$WORKTREE_BRANCH' removed."
