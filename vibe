@@ -1282,6 +1282,7 @@ def merge(path, want):
 
 merge(sys.argv[1], {
     "attribution": {"commit": "", "pr": ""},
+    "remoteControlAtStartup": True,
     "skipDangerousModePermissionPrompt": True,
     "theme": "auto",
 })
