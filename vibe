@@ -33,6 +33,7 @@ MOUNT_DIRS=()
 MOUNT_TARGETS=()
 MOUNT_MODES=()
 SHARED_DIRS=()
+LOCAL_DIRS=()
 PERMISSION_MODE="bypassPermissions"
 REMOVE_ON_EXIT=0
 PROFILE=""
@@ -50,6 +51,9 @@ Flags:
   -g    Force .claude/.gitignore on (add '*' entry)
   -G    Force .claude/.gitignore off (remove '*' entry)
   -h    Show this help message
+  -L D  Keep D local to the worktree although it sits inside .claude or a -S
+        directory, e.g. -L .claude/skills (repeatable). In .claude/.vibe-shared
+        write it as !D. Removing the worktree removes its copy
   -p    Shorthand for -P .. (mount parent directory)
   -P S  Mount host directory S read-only at /mount/<basename> (repeatable).
         -P S:T mounts it at T (absolute, or relative to /mount); append :rw
@@ -86,7 +90,7 @@ add_mount() {
 }
 
 # Parse flags
-while getopts "abBDgGhpP:Q:q:rS:u:U:x" opt; do
+while getopts "abBDgGhL:pP:Q:q:rS:u:U:x" opt; do
   case $opt in
     a) PERMISSION_MODE="auto";;
     b) BUILD=1;;
@@ -95,6 +99,7 @@ while getopts "abBDgGhpP:Q:q:rS:u:U:x" opt; do
     g) GITIGNORE_ON=1;;
     G) GITIGNORE_OFF=1;;
     h) usage;;
+    L) LOCAL_DIRS+=("$OPTARG");;
     p) add_mount ..;;
     P) add_mount "$OPTARG";;
     q) QUERY=1; QUERY_PROMPT="$OPTARG";;
@@ -541,30 +546,59 @@ read_project_profile "$VIBE_DIR/.vibe-profile"
 
 if [[ -f "$VIBE_DIR/.vibe-shared" ]]; then
   while read -r _sd || [[ -n "$_sd" ]]; do
-    [[ -z "$_sd" || "$_sd" == \#* ]] || SHARED_DIRS+=("$_sd")
+    case "$_sd" in
+      ''|\#*) ;;
+      !*) LOCAL_DIRS+=("${_sd#!}");;
+      *) SHARED_DIRS+=("$_sd");;
+    esac
   done < "$VIBE_DIR/.vibe-shared"
 fi
+# Strip ./ and trailing slashes; reject empty, absolute and dot components
+norm_rel_dir() {
+  local d="${1#./}"
+  while [[ "$d" == */ ]]; do d="${d%/}"; done
+  case "/$d/" in //|*//*|*/./*|*/../*) return 1;; esac
+  printf '%s' "$d"
+}
+# A worktree path must exist as a directory, created here so docker does not make it root-owned
+prepare_wt_dir() {
+  if [[ -e "$WORKTREE/$1" && ! -d "$WORKTREE/$1" ]]; then
+    echo "Error: '$1' exists in the worktree but is not a directory" >&2
+    exit 1
+  fi
+  mkdir -p "$TARGET_DIR/$1" "$WORKTREE/$1"
+}
 _shared=()
 for _sd in "${SHARED_DIRS[@]}"; do
-  _orig="$_sd" _sd="${_sd#./}"
-  while [[ "$_sd" == */ ]]; do _sd="${_sd%/}"; done
+  _orig="$_sd" _sd="$(norm_rel_dir "$_sd")" || _sd=""
   case "/$_sd/" in
-    *//*|*/./*|*/../*|/.claude/*|/.git/*|/.w/*)
+    //|/.claude/*|/.git/*|/.w/*)
       echo "Error: shared directory '$_orig' must be a relative path outside .claude, .git and .w" >&2
       exit 1;;
   esac
   for _x in "${_shared[@]}"; do [[ "$_x" == "$_sd" ]] && continue 2; done
   _shared+=("$_sd")
-  if [[ -n "$WORKTREE" ]]; then
-    if [[ -e "$WORKTREE/$_sd" && ! -d "$WORKTREE/$_sd" ]]; then
-      echo "Error: '$_sd' exists in the worktree but is not a directory" >&2
-      exit 1
-    fi
-    # Create the mount point ourselves so docker does not make it root-owned
-    mkdir -p "$TARGET_DIR/$_sd" "$WORKTREE/$_sd"
-  fi
+  [[ -z "$WORKTREE" ]] || prepare_wt_dir "$_sd"
 done
 SHARED_DIRS=("${_shared[@]}")
+# Docker applies mounts parent-first, so a local dir overlays the shared one around it
+_local=()
+for _ld in "${LOCAL_DIRS[@]}"; do
+  _orig="$_ld" _inside=0
+  if _ld="$(norm_rel_dir "$_ld")"; then
+    for _x in .claude "${SHARED_DIRS[@]}"; do
+      [[ "$_ld" == "$_x"/* ]] && _inside=1
+    done
+  fi
+  if ((!_inside)); then
+    echo "Error: local directory '$_orig' must be inside .claude or a shared directory" >&2
+    exit 1
+  fi
+  for _x in "${_local[@]}"; do [[ "$_x" == "$_ld" ]] && continue 2; done
+  _local+=("$_ld")
+  [[ -z "$WORKTREE" ]] || prepare_wt_dir "$_ld"
+done
+LOCAL_DIRS=("${_local[@]}")
 
 set_profile_paths
 
@@ -1296,6 +1330,9 @@ if [[ -n "$WORKTREE" ]]; then
   for _sd in "${SHARED_DIRS[@]}"; do
     VOLUMES+=(-v "$TARGET_DIR/$_sd:$TARGET_DIR/$WORKTREE_REL/$_sd")
   done
+  for _ld in "${LOCAL_DIRS[@]}"; do
+    VOLUMES+=(-v "$WORKTREE/$_ld:$TARGET_DIR/$WORKTREE_REL/$_ld")
+  done
 fi
 for _i in "${!MOUNT_DIRS[@]}"; do
   VOLUMES+=(-v "${MOUNT_DIRS[$_i]}:${MOUNT_TARGETS[$_i]}:${MOUNT_MODES[$_i]}")
@@ -1647,6 +1684,9 @@ EOF
   SYSTEM_PROMPT+="${_PROMPT}"$'\n\n'
   if [[ ${#SHARED_DIRS[@]} -gt 0 ]]; then
     SYSTEM_PROMPT+="These directories are shared with the main checkout and every other worktree, so changes there affect them all: $(IFS=', '; echo "${SHARED_DIRS[*]}")."$'\n\n'
+  fi
+  if [[ ${#LOCAL_DIRS[@]} -gt 0 ]]; then
+    SYSTEM_PROMPT+="These directories are local to this worktree even though their parent is shared: $(IFS=', '; echo "${LOCAL_DIRS[*]}")."$'\n\n'
   fi
 fi
 
