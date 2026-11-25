@@ -274,6 +274,10 @@ if [[ -n "${ON_BUILD:-}" && ! -f /tmp/.on_build_done ]]; then
   touch /tmp/.on_build_done
 fi
 
+if [[ ! -f /tmp/.graphify_installed ]]; then
+  graphify install &>/dev/null || true
+  touch /tmp/.graphify_installed
+fi
 
 exec "$@"
 '
@@ -377,6 +381,7 @@ RUN mkdir -p \
 RUN curl -fsSL https://claude.ai/install.sh | bash \
   && curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/home/$USER/.local/bin:$PATH"
+RUN uv tool install graphifyy
 
 # printf, not echo: RUN uses dash, whose echo eats backslash escapes and
 # corrupts any wrapper containing them.
@@ -540,6 +545,11 @@ elif ! ((VIBE_DIR_EXISTED)); then
   echo '*' > "$GITIGNORE"
 fi
 export VIBE_DIR
+
+# Own .gitignore so the graph stays ignored even when -G drops the .claude one
+GRAPHIFY_DIR="$VIBE_DIR/graphify"
+mkdir -p "$GRAPHIFY_DIR"
+[[ -f "$GRAPHIFY_DIR/.gitignore" ]] || echo '*' > "$GRAPHIFY_DIR/.gitignore"
 
 write_project_profile "$VIBE_DIR/.vibe-profile"
 read_project_profile "$VIBE_DIR/.vibe-profile"
@@ -1008,6 +1018,10 @@ if [[ -n "${WORKTREE_REL:-}" ]]; then
 else
   export VIBE_MOUNT="${TARGET_DIR}/.claude"
 fi
+# The graphify skill hardcodes graphify-out/ in the CWD; pre-create the mount point so docker doesn't make it root-owned
+GRAPHIFY_MOUNT="${VIBE_MOUNT%/.claude}/graphify-out"
+mkdir -p "$GRAPHIFY_MOUNT"
+[[ -f "$GRAPHIFY_MOUNT/.gitignore" ]] || echo '*' > "$GRAPHIFY_MOUNT/.gitignore"
 
 
 GID=$(id -g)
@@ -1299,6 +1313,7 @@ VOLUMES=(
   -v "${CLAUDE_PROJECTS}:/home/dev/.claude/projects"
   -v "${CLAUDE_STATE}:/home/dev/.local/state/claude"
   -v "$VIBE_DIR:$VIBE_MOUNT"
+  -v "$GRAPHIFY_DIR:$GRAPHIFY_MOUNT"
 )
 if ! ((IS_MACOS)); then
   # Docker won't follow a symlinked mount source: it sees the link, decides the
@@ -1715,6 +1730,7 @@ else
 fi
 
 SYSTEM_PROMPT+="Memory is shared across concurrent sessions: agents in other worktrees or parallel sessions may write memory files and MEMORY.md at the same time as you. After saving or editing a memory, re-read the file to verify your change landed intact — re-apply it if a concurrent write clobbered it — before moving on to the next step."$'\n\n'
+SYSTEM_PROMPT+="If graphify-out/graph.json exists, keep the knowledge graph current without being asked: run the graphify skill with '. --update' after large changes (big refactors, new modules, many files touched) and every now and then at the end of a substantial task. The graph is shared across all worktrees. If no graph exists, do not build one unless the user asks."$'\n\n'
 
 if [[ ${#MOUNT_DIRS[@]} -gt 0 ]]; then
   _names=()
