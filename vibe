@@ -18,6 +18,12 @@ while True:
 IS_MACOS=0
 [[ "$(uname -s)" == "Darwin" ]] && IS_MACOS=1
 
+# Invoked as pio (a symlink to this file), the same tooling drives pi instead of Claude Code
+TOOL=vibe AGENT=claude PROJ=.claude
+[[ "$(basename "$0")" == pio ]] && TOOL=pio AGENT=pi PROJ=.pi
+IS_PI=0
+[[ "$AGENT" == pi ]] && IS_PI=1
+
 # Default modes
 DEBUG=0
 BUILD=0
@@ -40,19 +46,24 @@ PROFILE=""
 PROFILE_PERSIST=0
 
 usage() {
-  cat <<'EOF'
-Usage: vibe [flags] [directory] [-- args...]
+  local a_flag="" home_desc="Claude profile P: its own login, settings and rules, kept in
+        ~/.vibe/profiles/P instead of ~/.claude"
+  ((IS_PI)) || a_flag="
+  -a    Auto permission mode instead of bypass"
+  ((IS_PI)) && home_desc="pi profile P: its own login, settings and rules, kept in
+        ~/.vibe/pi-profiles/P instead of ~/.pi/agent"
+  cat <<EOF
+Usage: $TOOL [flags] [directory] [-- args...]
 
-Flags:
-  -a    Auto permission mode instead of bypass
+Flags:${a_flag}
   -b    Build the container image before starting
   -B    Build with no cache (implies -b)
   -D    Debug mode (shell into the container)
-  -g    Force .claude/.gitignore on (add '*' entry)
-  -G    Force .claude/.gitignore off (remove '*' entry)
+  -g    Force $PROJ/.gitignore on (add '*' entry)
+  -G    Force $PROJ/.gitignore off (remove '*' entry)
   -h    Show this help message
-  -L D  Keep D local to the worktree although it sits inside .claude or a -S
-        directory, e.g. -L .claude/skills (repeatable). In .claude/.vibe-shared
+  -L D  Keep D local to the worktree although it sits inside $PROJ or a -S
+        directory, e.g. -L $PROJ/skills (repeatable). In $PROJ/.vibe-shared
         write it as !D. Removing the worktree removes its copy
   -p    Shorthand for -P .. (mount parent directory)
   -P S  Mount host directory S read-only at /mount/<basename> (repeatable).
@@ -63,12 +74,11 @@ Flags:
         throwaway container so it can run alongside an existing one
   -r    Remove the container on exit instead of keeping it for reuse
   -S D  Share directory D (relative to the repo root) between the main checkout
-        and its worktrees, like .claude/ (repeatable). Project defaults go in
-        .claude/.vibe-shared, one per line
-  -u P  Use the Claude profile P: its own login, settings and rules, kept in
-        ~/.vibe/profiles/P instead of ~/.claude. A project can set its own
-        default in .claude/.vibe-profile; -u overrides it for this run only
-  -U P  Like -u, but also writes P to .claude/.vibe-profile so the project
+        and its worktrees, like $PROJ/ (repeatable). Project defaults go in
+        $PROJ/.vibe-shared, one per line
+  -u P  Use the $home_desc. A project can set its own
+        default in $PROJ/.vibe-profile; -u overrides it for this run only
+  -U P  Like -u, but also writes P to $PROJ/.vibe-profile so the project
         keeps using it next time
   -x    Tear down the container and exit
 EOF
@@ -92,7 +102,8 @@ add_mount() {
 # Parse flags
 while getopts "abBDgGhL:pP:Q:q:rS:u:U:x" opt; do
   case $opt in
-    a) PERMISSION_MODE="auto";;
+    a) ((IS_PI)) && { echo "Error: -a has no pi equivalent; pi never asks before tool calls" >&2; exit 1; }
+       PERMISSION_MODE="auto";;
     b) BUILD=1;;
     B) NO_CACHE=1; BUILD=1;;
     D) DEBUG=1;;
@@ -157,23 +168,33 @@ write_project_profile() {
   echo "$PROFILE" > "$file"
 }
 
-# The default profile is the host's own claude home, so vibe keeps sharing its
-# login with a host-installed claude; named ones are self-contained under ~/.vibe.
+# The default profile is the host's own agent home, so vibe keeps sharing its
+# login with a host-installed agent; named ones are self-contained under ~/.vibe.
+# pi keeps login, settings and state in its one agent dir.
 set_profile_paths() {
-  if [[ -n "$PROFILE" ]]; then
-    CLAUDE_HOME="${VIBE_HOME}/profiles/${PROFILE}/claude"
+  if ((IS_PI)); then
+    if [[ -n "$PROFILE" ]]; then
+      AGENT_HOME="${VIBE_HOME}/pi-profiles/${PROFILE}/agent"
+    else
+      AGENT_HOME="${PI_CODING_AGENT_DIR:-${HOME}/.pi/agent}"
+    fi
+    AGENT_MOUNT=/home/dev/.pi/agent
+  elif [[ -n "$PROFILE" ]]; then
+    AGENT_HOME="${VIBE_HOME}/profiles/${PROFILE}/claude"
     CLAUDE_JSON="${VIBE_HOME}/profiles/${PROFILE}/claude.json"
     CLAUDE_STATE="${VIBE_HOME}/profiles/${PROFILE}/state"
+    AGENT_MOUNT=/home/dev/.claude
   else
-    CLAUDE_HOME="${HOME}/.claude"
+    AGENT_HOME="${HOME}/.claude"
     CLAUDE_JSON="${HOME}/.claude.json"
     CLAUDE_STATE="${HOME}/.local/state/claude"
+    AGENT_MOUNT=/home/dev/.claude
   fi
 }
 
 # Image build definitions, hoisted so an isolated query (-Q) can build the
 # base image before any project or socket setup runs below.
-IMAGE_NAME="vibe-base"
+IMAGE_NAME="${TOOL}-base"
 ENTRYPOINT_SCRIPT='#!/bin/bash
 
 if [[ -S /tmp/agent-relay/ssh.sock ]]; then
@@ -234,7 +255,9 @@ if [[ -d /tmp/host_gh_config ]]; then
   ln -sfn /tmp/host_gh_config "$HOME/.config/gh"
 fi
 
-if [[ -f /tmp/host_claude_json ]]; then
+if [[ "${VIBE_AGENT:-claude}" != claude ]]; then
+  :
+elif [[ -f /tmp/host_claude_json ]]; then
   ln -sf /tmp/host_claude_json "$HOME/.claude.json"
 else
   if [[ ! -f "$HOME/.claude/claude.json" ]]; then
@@ -254,7 +277,7 @@ if [[ -p /tmp/browser_fifo ]] || [[ -d /tmp/browser_queue ]]; then
   export BROWSER="xdg-open"
 fi
 
-node -e "
+[[ "${VIBE_AGENT:-claude}" == claude ]] && node -e "
   var fs = require('"'"'fs'"'"'), f = process.env.HOME + '"'"'/.claude.json'"'"';
   var d = JSON.parse(fs.readFileSync(f, '"'"'utf8'"'"'));
   var p = d.projects = d.projects || {}, dir = process.cwd();
@@ -275,7 +298,11 @@ if [[ -n "${ON_BUILD:-}" && ! -f /tmp/.on_build_done ]]; then
 fi
 
 if [[ ! -f /tmp/.graphify_installed ]]; then
-  graphify install &>/dev/null || true
+  if [[ "${VIBE_AGENT:-claude}" == pi ]]; then
+    graphify install --platform pi &>/dev/null || true
+  else
+    graphify install &>/dev/null || true
+  fi
   touch /tmp/.graphify_installed
 fi
 
@@ -350,7 +377,18 @@ FROM debian:latest
 RUN apt-get update -y \
   && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends \
-    curl build-essential git sudo openssh-client gnupg nodejs npm python3 python3-dev iproute2 socat \
+    curl build-essential git sudo openssh-client gnupg python3 python3-dev iproute2 socat \
+  && rm -rf /var/lib/apt/lists/*
+
+# pi needs a newer Node than Debian ships
+ARG AGENT=claude
+ENV VIBE_AGENT=$AGENT
+RUN if [ "$AGENT" = pi ]; then \
+      curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+      && apt-get install -y --no-install-recommends nodejs ripgrep; \
+    else \
+      apt-get update -y && apt-get install -y --no-install-recommends nodejs npm; \
+    fi \
   && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -376,11 +414,17 @@ WORKDIR /tmp
 RUN mkdir -p \
   /home/$USER/.local/bin \
   /home/$USER/.local/state/claude \
-  /home/$USER/.claude
+  /home/$USER/.claude \
+  /home/$USER/.pi/agent
 
-RUN curl -fsSL https://claude.ai/install.sh | bash \
+RUN if [ "$AGENT" = pi ]; then \
+      npm install -g --prefix /home/$USER/.local --ignore-scripts @earendil-works/pi-coding-agent; \
+    else \
+      curl -fsSL https://claude.ai/install.sh | bash; \
+    fi \
   && curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/home/$USER/.local/bin:$PATH"
+ENV PI_SKIP_VERSION_CHECK=1
 RUN uv tool install graphifyy
 
 # printf, not echo: RUN uses dash, whose echo eats backslash escapes and
@@ -407,6 +451,7 @@ build_image() {
   docker build -t "$IMAGE_NAME" \
     --build-arg "UID=$(id -u)" \
     --build-arg "GID=$(id -g)" \
+    --build-arg "AGENT=$AGENT" \
     --build-arg "ENTRYPOINT=$ENTRYPOINT_SCRIPT" \
     --build-arg "BROWSER_WRAPPER=$BROWSER_WRAPPER" \
     --build-arg "CLIPBOARD_WRAPPER=$CLIPBOARD_WRAPPER" \
@@ -420,15 +465,20 @@ if ((ISOLATED)); then
   if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     build_image >&2
   fi
-  _profile_file="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.claude/.vibe-profile"
+  _profile_file="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/$PROJ/.vibe-profile"
   write_project_profile "$_profile_file"
   read_project_profile "$_profile_file"
   set_profile_paths
-  mkdir -p "$CLAUDE_HOME"
+  mkdir -p "$AGENT_HOME"
+  if ((IS_PI)); then
+    exec docker run --rm \
+      -v "${AGENT_HOME}:${AGENT_MOUNT}" \
+      "$IMAGE_NAME" pi -p --approve --no-session "$QUERY_PROMPT" < /dev/null
+  fi
   [[ -f "$CLAUDE_JSON" ]] || echo '{}' > "$CLAUDE_JSON"
   exec docker run --rm \
     -v "${CLAUDE_JSON}:/tmp/host_claude_json" \
-    -v "${CLAUDE_HOME}:/home/dev/.claude" \
+    -v "${AGENT_HOME}:${AGENT_MOUNT}" \
     "$IMAGE_NAME" claude -p "$QUERY_PROMPT" --dangerously-skip-permissions < /dev/null
 fi
 
@@ -522,11 +572,11 @@ for _i in "${!MOUNT_DIRS[@]}"; do
   done
 done
 
-# Ensure .claude/ exists and mount it
+# Ensure the project dir (.claude/, or .pi/ for pio) exists and mount it
 if [[ -n "$WORKTREE" ]]; then
-  VIBE_DIR="$(git rev-parse --show-toplevel)/.claude"
+  VIBE_DIR="$(git rev-parse --show-toplevel)/$PROJ"
 else
-  VIBE_DIR="${TARGET_DIR}/.claude"
+  VIBE_DIR="${TARGET_DIR}/$PROJ"
 fi
 VIBE_DIR_EXISTED=0
 [[ -d "$VIBE_DIR" ]] && VIBE_DIR_EXISTED=1
@@ -546,7 +596,7 @@ elif ! ((VIBE_DIR_EXISTED)); then
 fi
 export VIBE_DIR
 
-# Own .gitignore so the graph stays ignored even when -G drops the .claude one
+# Own .gitignore so the graph stays ignored even when -G drops the project one
 GRAPHIFY_DIR="$VIBE_DIR/graphify"
 mkdir -p "$GRAPHIFY_DIR"
 [[ -f "$GRAPHIFY_DIR/.gitignore" ]] || echo '*' > "$GRAPHIFY_DIR/.gitignore"
@@ -582,8 +632,8 @@ _shared=()
 for _sd in "${SHARED_DIRS[@]}"; do
   _orig="$_sd" _sd="$(norm_rel_dir "$_sd")" || _sd=""
   case "/$_sd/" in
-    //|/.claude/*|/.git/*|/.w/*)
-      echo "Error: shared directory '$_orig' must be a relative path outside .claude, .git and .w" >&2
+    //|"/$PROJ/"*|/.git/*|/.w/*)
+      echo "Error: shared directory '$_orig' must be a relative path outside $PROJ, .git and .w" >&2
       exit 1;;
   esac
   for _x in "${_shared[@]}"; do [[ "$_x" == "$_sd" ]] && continue 2; done
@@ -596,12 +646,12 @@ _local=()
 for _ld in "${LOCAL_DIRS[@]}"; do
   _orig="$_ld" _inside=0
   if _ld="$(norm_rel_dir "$_ld")"; then
-    for _x in .claude "${SHARED_DIRS[@]}"; do
+    for _x in "$PROJ" "${SHARED_DIRS[@]}"; do
       [[ "$_ld" == "$_x"/* ]] && _inside=1
     done
   fi
   if ((!_inside)); then
-    echo "Error: local directory '$_orig' must be inside .claude or a shared directory" >&2
+    echo "Error: local directory '$_orig' must be inside $PROJ or a shared directory" >&2
     exit 1
   fi
   for _x in "${_local[@]}"; do [[ "$_x" == "$_ld" ]] && continue 2; done
@@ -612,17 +662,17 @@ LOCAL_DIRS=("${_local[@]}")
 
 set_profile_paths
 
-# Rules, hooks and settings live in the claude home so vibe leaves no footprint
+# Rules, hooks and settings live in the agent home so vibe leaves no footprint
 # in the project (a third-party repo may ship its own .claude/). Whichever home
-# the profile picked, the container always sees it as /home/dev/.claude.
-mkdir -p "$CLAUDE_HOME"
-export CLAUDE_HOME
+# the profile picked, the container always sees it at AGENT_MOUNT.
+mkdir -p "$AGENT_HOME"
 
-# Inject/update a managed section in ~/.claude/CLAUDE.md
+# Inject/update a managed section in the agent's global instructions file
 # Usage: inject_section "## Heading" "content"
 inject_section() {
   local heading="$1" content="$2"
-  local claude_md="$CLAUDE_HOME/CLAUDE.md"
+  local claude_md="$AGENT_HOME/CLAUDE.md"
+  ((IS_PI)) && claude_md="$AGENT_HOME/AGENTS.md"
   local block
   block="$(printf '%s\n\n%s' "$heading" "$content")"
 
@@ -675,12 +725,13 @@ At session start, run: export PATH="$(cat ~/.bin-paths 2>/dev/null | tr '\n' ':'
 
 Save project context in .claude/: BACKLOG.md and PROGRESS.md in the location named in your system prompt (project-wide at .claude/ root on the default branch, .claude/branches/<branch>/ elsewhere); MEMORY.md and per-memory files under .claude/memory/ are shared across all branches. .claude/ is bind-mounted from the parent repo, persists across worktrees. Max 150 lines per file.
 ENV
+ENV_CONTENT="${ENV_CONTENT//.claude\//$PROJ/}"
 inject_section "## Environment (maintained by the vibe utility)" "$ENV_CONTENT"
 
 # Drop what older versions wrote into the project; nothing refreshes it now that
 # rules, hooks and settings are global, so it would linger as stale duplicates.
 PROJECT_CLAUDE_MD="$VIBE_DIR/CLAUDE.md"
-if [[ -f "$PROJECT_CLAUDE_MD" ]] && grep -q '^## .* (maintained by the vibe utility)$' "$PROJECT_CLAUDE_MD"; then
+if ! ((IS_PI)) && [[ -f "$PROJECT_CLAUDE_MD" ]] && grep -q '^## .* (maintained by the vibe utility)$' "$PROJECT_CLAUDE_MD"; then
   awk '
     /^## .* \(maintained by the vibe utility\)$/ { skip=1; next }
     skip && /^## / { skip=0 }
@@ -693,12 +744,13 @@ if [[ -f "$PROJECT_CLAUDE_MD" ]] && grep -q '^## .* (maintained by the vibe util
     rm -f "$PROJECT_CLAUDE_MD.tmp" "$PROJECT_CLAUDE_MD"
   fi
 fi
-rm -rf "$VIBE_DIR/vibe-hooks"
+((IS_PI)) || rm -rf "$VIBE_DIR/vibe-hooks"
 
 # Enforce the rules that prompts can't reliably enforce, via Claude Code hooks.
 # Scripts are (re)written each run; only their references are merged into
 # ~/.claude/settings.json so an existing user config is never clobbered.
-HOOKS_DIR="$CLAUDE_HOME/vibe-hooks"
+# pi has no hooks, so an extension feeds them Claude-shaped input instead.
+HOOKS_DIR="$AGENT_HOME/vibe-hooks"
 mkdir -p "$HOOKS_DIR"
 
 cat > "$HOOKS_DIR/prompt_gate.py" <<'PY'
@@ -894,9 +946,68 @@ elif mx == 2 and mx > mx_old:
 sys.exit(0)
 PY
 
-VIBE_DIR="$VIBE_DIR" CLAUDE_HOME="$CLAUDE_HOME" python3 - <<'PY'
+if ((IS_PI)); then
+mkdir -p "$AGENT_HOME/extensions"
+cat > "$AGENT_HOME/extensions/vibe-guard.ts" <<'TS'
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const HOOKS = join(dirname(fileURLToPath(import.meta.url)), "..", "vibe-hooks");
+
+function hook(name: string, payload: object) {
+  return spawnSync("python3", [join(HOOKS, name)], {
+    input: JSON.stringify(payload),
+    encoding: "utf8",
+  });
+}
+
+export default function (pi: any) {
+  // Messages an extension injects are not a new user turn.
+  pi.on("input", (event: any, ctx: any) => {
+    if (event.source !== "extension") {
+      hook("prompt_gate.py", { prompt: event.text, session_id: ctx.sessionManager.getSessionId() });
+    }
+    return { action: "continue" };
+  });
+
+  pi.on("tool_call", (event: any, ctx: any) => {
+    if (event.toolName !== "bash") return;
+    const r = hook("commit_guard.py", {
+      tool_input: { command: event.input.command },
+      session_id: ctx.sessionManager.getSessionId(),
+    });
+    if (r.status === 2) return { block: true, reason: r.stderr };
+  });
+
+  // The edit already landed, so a "block" can only be reported back to the model.
+  pi.on("tool_result", (event: any, ctx: any) => {
+    if (event.isError || !["edit", "write"].includes(event.toolName)) return;
+    const { path, content, edits } = event.input;
+    const r = hook("comment_guard.py", {
+      tool_input: {
+        file_path: path,
+        content,
+        edits: (edits || []).map((e: any) => ({ old_string: e.oldText, new_string: e.newText })),
+      },
+    });
+    let out: any;
+    try { out = JSON.parse(r.stdout); } catch { return; }
+    if (out.systemMessage) ctx.ui.notify(out.systemMessage, "warning");
+    const note = out.reason ?? out.hookSpecificOutput?.additionalContext;
+    if (note) {
+      return {
+        content: [...event.content, { type: "text", text: note }],
+        structuredContent: event.structuredContent,
+      };
+    }
+  });
+}
+TS
+else
+VIBE_DIR="$VIBE_DIR" AGENT_HOME="$AGENT_HOME" python3 - <<'PY'
 import json, os, sys
-path = os.path.join(os.environ["CLAUDE_HOME"], "settings.json")
+path = os.path.join(os.environ["AGENT_HOME"], "settings.json")
 data = {}
 if os.path.exists(path):
     try:
@@ -974,6 +1085,7 @@ if os.path.exists(old):
         else:
             os.remove(old)
 PY
+fi
 
 
 # Sanitize a string to only contain alphanumeric characters and hyphens
@@ -984,10 +1096,12 @@ DIR_HASH="$(echo -n "${TARGET_DIR}${PROFILE}" | md5sum | cut -c1-4)"
 DIR_BASENAME="$(sanitize "$(basename "$TARGET_DIR")")"
 
 # Set terminal/tmux window name early (before slow docker run)
+TITLE_PREFIX=""
+((IS_PI)) && TITLE_PREFIX=p
 if [[ -n "$WORKTREE_BRANCH" ]]; then
-  WINDOW_TITLE="w:${DIR_BASENAME}:${WORKTREE_BRANCH}${PROFILE:+@$PROFILE}"
+  WINDOW_TITLE="${TITLE_PREFIX}w:${DIR_BASENAME}:${WORKTREE_BRANCH}${PROFILE:+@$PROFILE}"
 else
-  WINDOW_TITLE="v:${DIR_BASENAME}${PROFILE:+@$PROFILE}"
+  WINDOW_TITLE="${TITLE_PREFIX:-v}:${DIR_BASENAME}${PROFILE:+@$PROFILE}"
 fi
 TMUX_WINDOW=""
 if ((QUERY)); then
@@ -1004,22 +1118,22 @@ fi
 # For worktrees, include the branch name (DIR_BASENAME is already the repo name)
 if [[ -n "$WORKTREE" ]]; then
   BRANCH_BASENAME="$(sanitize "$WORKTREE_BRANCH")"
-  PROJECT_NAME="vibe-${DIR_BASENAME}-${BRANCH_BASENAME}${PROFILE:+-$PROFILE}-${DIR_HASH}"
+  PROJECT_NAME="${TOOL}-${DIR_BASENAME}-${BRANCH_BASENAME}${PROFILE:+-$PROFILE}-${DIR_HASH}"
 else
-  PROJECT_NAME="vibe-${DIR_BASENAME}${PROFILE:+-$PROFILE}-${DIR_HASH}"
+  PROJECT_NAME="${TOOL}-${DIR_BASENAME}${PROFILE:+-$PROFILE}-${DIR_HASH}"
 fi
 
 PROJECT_NAME="$(tolower "$PROJECT_NAME")"
 export PROJECT_NAME
 
-# Mount .claude inside the worktree CWD so Claude can find it
+# Mount the project dir inside the worktree CWD so the agent can find it
 if [[ -n "${WORKTREE_REL:-}" ]]; then
-  export VIBE_MOUNT="${TARGET_DIR}/${WORKTREE_REL}/.claude"
+  export VIBE_MOUNT="${TARGET_DIR}/${WORKTREE_REL}/$PROJ"
 else
-  export VIBE_MOUNT="${TARGET_DIR}/.claude"
+  export VIBE_MOUNT="${TARGET_DIR}/$PROJ"
 fi
 # The graphify skill hardcodes graphify-out/ in the CWD; pre-create the mount point so docker doesn't make it root-owned
-GRAPHIFY_MOUNT="${VIBE_MOUNT%/.claude}/graphify-out"
+GRAPHIFY_MOUNT="${VIBE_MOUNT%/"$PROJ"}/graphify-out"
 mkdir -p "$GRAPHIFY_MOUNT"
 [[ -f "$GRAPHIFY_MOUNT/.gitignore" ]] || echo '*' > "$GRAPHIFY_MOUNT/.gitignore"
 
@@ -1239,12 +1353,17 @@ if [[ -f "$ON_BUILD_SCRIPT" ]]; then
   export ON_BUILD
 fi
 
+if ((IS_PI)); then
+  # pi keys sessions by cwd under sessions/, so a project-local store keeps them with the project
+  AGENT_SESSIONS="${VIBE_DIR}/.sessions"
+  mkdir -p "$AGENT_HOME" "$AGENT_SESSIONS" "$AGENT_HOME/sessions"
+else
 CLAUDE_PROJECTS="${VIBE_DIR}/.projects"
-mkdir -p "$CLAUDE_HOME" "$CLAUDE_STATE" "$CLAUDE_PROJECTS"
+mkdir -p "$AGENT_HOME" "$CLAUDE_STATE" "$CLAUDE_PROJECTS"
 
 # Migrate existing conversation history to project-local storage (one-time)
 PROJECT_KEY="$(echo "$TARGET_DIR" | sed 's/[^a-zA-Z0-9]/-/g')"
-HOST_PROJECT_DIR="${CLAUDE_HOME}/projects/${PROJECT_KEY}"
+HOST_PROJECT_DIR="${AGENT_HOME}/projects/${PROJECT_KEY}"
 if [[ -d "$HOST_PROJECT_DIR" ]] && [[ ! -d "${CLAUDE_PROJECTS}/${PROJECT_KEY}" ]]; then
   mv "$HOST_PROJECT_DIR" "${CLAUDE_PROJECTS}/${PROJECT_KEY}"
 fi
@@ -1271,7 +1390,7 @@ fi
 
 # Ensure baseline global Claude settings; files are rewritten only when a
 # value actually differs, and left untouched if they contain invalid JSON.
-python3 - "$CLAUDE_HOME/settings.json" "$CLAUDE_JSON" <<'PY'
+python3 - "$AGENT_HOME/settings.json" "$CLAUDE_JSON" <<'PY'
 import json, os, sys
 
 def merge(path, want):
@@ -1303,15 +1422,28 @@ merge(sys.argv[1], {
 merge(sys.argv[2], {"autoUpdates": False})
 PY
 
+fi
+
 # Build volumes array
 VOLUMES=(
   -v "$TARGET_DIR:$TARGET_DIR${VOLUME_RO:-}"
   -v "${GITCONFIG:-/dev/null}:/tmp/host_gitconfig"
   -v "${GH_CONFIG_SRC:-/dev/null}:/tmp/host_gh_config"
-  -v "${CLAUDE_JSON}:/tmp/host_claude_json"
-  -v "${CLAUDE_HOME}:/home/dev/.claude"
-  -v "${CLAUDE_PROJECTS}:/home/dev/.claude/projects"
-  -v "${CLAUDE_STATE}:/home/dev/.local/state/claude"
+)
+if ((IS_PI)); then
+  VOLUMES+=(
+    -v "${AGENT_HOME}:${AGENT_MOUNT}"
+    -v "${AGENT_SESSIONS}:${AGENT_MOUNT}/sessions"
+  )
+else
+  VOLUMES+=(
+    -v "${CLAUDE_JSON}:/tmp/host_claude_json"
+    -v "${AGENT_HOME}:${AGENT_MOUNT}"
+    -v "${CLAUDE_PROJECTS}:${AGENT_MOUNT}/projects"
+    -v "${CLAUDE_STATE}:/home/dev/.local/state/claude"
+  )
+fi
+VOLUMES+=(
   -v "$VIBE_DIR:$VIBE_MOUNT"
   -v "$GRAPHIFY_DIR:$GRAPHIFY_MOUNT"
 )
@@ -1684,11 +1816,15 @@ fi
 
 # Query one-off: run the prompt non-interactively and print the result to stdout.
 if ((QUERY)); then
-  "${EXEC[@]}" /entrypoint.sh claude -p "$QUERY_PROMPT" --dangerously-skip-permissions < /dev/null
+  if ((IS_PI)); then
+    "${EXEC[@]}" /entrypoint.sh pi -p --approve "$QUERY_PROMPT" < /dev/null
+  else
+    "${EXEC[@]}" /entrypoint.sh claude -p "$QUERY_PROMPT" --dangerously-skip-permissions < /dev/null
+  fi
   exit 0
 fi
 
-# Run Claude Code in the container
+# Run the agent in the container
 SYSTEM_PROMPT=""
 
 if [[ -n "$WORKTREE" ]]; then
@@ -1706,9 +1842,9 @@ EOF
   fi
 fi
 
-# .claude/ is shared across worktrees, so the branch-scoped path can only be
+# The project dir is shared across worktrees, so the branch-scoped path can only be
 # resolved per-container — baking it into CLAUDE.md would race between sessions.
-# The default branch owns the global BACKLOG/PROGRESS at .claude/ root; other
+# The default branch owns the global BACKLOG/PROGRESS at the project dir root; other
 # branches get their own subdirectory and read/update access to the global ones.
 VIBE_BRANCH="${WORKTREE_BRANCH:-$(git -C "$WORKDIR" branch --show-current 2>/dev/null || true)}"
 DEFAULT_BRANCH="$(git -C "$WORKDIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
@@ -1722,11 +1858,11 @@ if [[ -z "$DEFAULT_BRANCH" ]]; then
   done
 fi
 if [[ -n "$VIBE_BRANCH" && "$VIBE_BRANCH" == "$DEFAULT_BRANCH" ]]; then
-  SYSTEM_PROMPT+="You are on the default branch '${VIBE_BRANCH}'. BACKLOG.md and PROGRESS.md live at .claude/ root — they are the project-wide files for global tasks. Keep plans for a specific task or epic in that task's branch directory under .claude/branches/, not here. .claude/ is shared across all worktrees. MEMORY.md and .claude/memory/ remain shared."$'\n\n'
+  SYSTEM_PROMPT+="You are on the default branch '${VIBE_BRANCH}'. BACKLOG.md and PROGRESS.md live at ${PROJ}/ root — they are the project-wide files for global tasks. Keep plans for a specific task or epic in that task's branch directory under ${PROJ}/branches/, not here. ${PROJ}/ is shared across all worktrees. MEMORY.md and ${PROJ}/memory/ remain shared."$'\n\n'
 else
   VIBE_BRANCH_SLUG="${VIBE_BRANCH:-detached}"
   VIBE_BRANCH_SLUG="${VIBE_BRANCH_SLUG//\//-}"
-  SYSTEM_PROMPT+="BACKLOG.md and PROGRESS.md for this branch live in .claude/branches/${VIBE_BRANCH_SLUG}/ — read and write them there, and create the directory if it does not exist. The BACKLOG.md and PROGRESS.md at .claude/ root are project-wide and owned by the default branch: read them for global context and update a global task's status when your work changes it, but keep this branch's own plans and progress in your subdirectory. .claude/ is shared across all worktrees. MEMORY.md and .claude/memory/ remain shared."$'\n\n'
+  SYSTEM_PROMPT+="BACKLOG.md and PROGRESS.md for this branch live in ${PROJ}/branches/${VIBE_BRANCH_SLUG}/ — read and write them there, and create the directory if it does not exist. The BACKLOG.md and PROGRESS.md at ${PROJ}/ root are project-wide and owned by the default branch: read them for global context and update a global task's status when your work changes it, but keep this branch's own plans and progress in your subdirectory. ${PROJ}/ is shared across all worktrees. MEMORY.md and ${PROJ}/memory/ remain shared."$'\n\n'
 fi
 
 SYSTEM_PROMPT+="Memory is shared across concurrent sessions: agents in other worktrees or parallel sessions may write memory files and MEMORY.md at the same time as you. After saving or editing a memory, re-read the file to verify your change landed intact — re-apply it if a concurrent write clobbered it — before moving on to the next step."$'\n\n'
@@ -1741,13 +1877,22 @@ if [[ ${#MOUNT_DIRS[@]} -gt 0 ]]; then
   SYSTEM_PROMPT+="Host directories mounted at: ${_list%, }."$'\n'
 fi
 
-TOOL_FLAGS=(--permission-mode "$PERMISSION_MODE" --allow-dangerously-skip-permissions)
+# --approve trusts the project's .pi/ for this run only, as Claude's accepted trust dialog does
+TOOL_FLAGS=(--approve)
+((IS_PI)) || TOOL_FLAGS=(--permission-mode "$PERMISSION_MODE" --allow-dangerously-skip-permissions)
 if [[ -n "$SYSTEM_PROMPT" ]]; then
   TOOL_FLAGS+=(--append-system-prompt "$SYSTEM_PROMPT")
 fi
 
 
-if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+# pi -c starts a fresh session when there is none to continue
+if ((IS_PI)); then
+  if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+    "${EXEC[@]}" /entrypoint.sh pi "${TOOL_FLAGS[@]}" "${EXTRA_ARGS[@]}"
+  else
+    "${EXEC[@]}" /entrypoint.sh pi -c "${TOOL_FLAGS[@]}"
+  fi
+elif [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
   "${EXEC[@]}" /entrypoint.sh claude "${TOOL_FLAGS[@]}" "${EXTRA_ARGS[@]}"
 else
   "${EXEC[@]}" /entrypoint.sh claude --continue "${TOOL_FLAGS[@]}" \
