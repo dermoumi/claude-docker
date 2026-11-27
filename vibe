@@ -38,6 +38,7 @@ QUERY_PROMPT=""
 MOUNT_DIRS=()
 MOUNT_TARGETS=()
 MOUNT_MODES=()
+EXTRA_ENVS=()
 SHARED_DIRS=()
 LOCAL_DIRS=()
 PERMISSION_MODE="bypassPermissions"
@@ -59,6 +60,8 @@ Flags:${a_flag}
   -b    Build the container image before starting
   -B    Build with no cache (implies -b)
   -D    Debug mode (shell into the container)
+  -e E  Set an env var in the container, docker style: -e NAME=VALUE sets it,
+        -e NAME forwards the host's value (repeatable)
   -g    Force $PROJ/.gitignore on (add '*' entry)
   -G    Force $PROJ/.gitignore off (remove '*' entry)
   -h    Show this help message
@@ -100,13 +103,14 @@ add_mount() {
 }
 
 # Parse flags
-while getopts "abBDgGhL:pP:Q:q:rS:u:U:x" opt; do
+while getopts "abBDe:gGhL:pP:Q:q:rS:u:U:x" opt; do
   case $opt in
     a) ((IS_PI)) && { echo "Error: -a has no pi equivalent; pi never asks before tool calls" >&2; exit 1; }
        PERMISSION_MODE="auto";;
     b) BUILD=1;;
     B) NO_CACHE=1; BUILD=1;;
     D) DEBUG=1;;
+    e) EXTRA_ENVS+=(-e "$OPTARG");;
     g) GITIGNORE_ON=1;;
     G) GITIGNORE_OFF=1;;
     h) usage;;
@@ -474,12 +478,12 @@ if ((ISOLATED)); then
   set_profile_paths
   mkdir -p "$AGENT_HOME"
   if ((IS_PI)); then
-    exec docker run --rm \
+    exec docker run --rm "${EXTRA_ENVS[@]}" \
       -v "${AGENT_HOME}:${AGENT_MOUNT}" \
       "$IMAGE_NAME" pi -p --approve --no-session "$QUERY_PROMPT" < /dev/null
   fi
   [[ -f "$CLAUDE_JSON" ]] || echo '{}' > "$CLAUDE_JSON"
-  exec docker run --rm \
+  exec docker run --rm "${EXTRA_ENVS[@]}" \
     -v "${CLAUDE_JSON}:/tmp/host_claude_json" \
     -v "${AGENT_HOME}:${AGENT_MOUNT}" \
     "$IMAGE_NAME" claude -p "$QUERY_PROMPT" --dangerously-skip-permissions < /dev/null
@@ -1527,6 +1531,7 @@ ENVS=(
   -e "WORKDIR=${WORKDIR}"
   -e "ON_BUILD=${ON_BUILD:-}"
   -e COLORTERM
+  "${EXTRA_ENVS[@]}"
 )
 [[ -n "$SSH_RELAY_PORT" ]] && ENVS+=(-e "SSH_RELAY_PORT=${SSH_RELAY_PORT}")
 [[ -n "$GPG_RELAY_PORT" ]] && ENVS+=(-e "GPG_RELAY_PORT=${GPG_RELAY_PORT}")
