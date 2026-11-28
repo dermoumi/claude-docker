@@ -18,11 +18,16 @@ while True:
 IS_MACOS=0
 [[ "$(uname -s)" == "Darwin" ]] && IS_MACOS=1
 
-# Invoked as pio (a symlink to this file), the same tooling drives pi instead of Claude Code
+# Invoked as pio or ocd (symlinks to this file), the same tooling drives pi or
+# OpenCode instead of Claude Code
 TOOL=vibe AGENT=claude PROJ=.claude
-[[ "$(basename "$0")" == pio ]] && TOOL=pio AGENT=pi PROJ=.pi
-IS_PI=0
+case "$(basename "$0")" in
+  pio) TOOL=pio AGENT=pi PROJ=.pi ;;
+  ocd) TOOL=ocd AGENT=opencode PROJ=.opencode ;;
+esac
+IS_PI=0 IS_OC=0
 [[ "$AGENT" == pi ]] && IS_PI=1
+[[ "$AGENT" == opencode ]] && IS_OC=1
 
 # Default modes
 DEBUG=0
@@ -47,12 +52,16 @@ PROFILE=""
 PROFILE_PERSIST=0
 
 usage() {
-  local a_flag="" home_desc="Claude profile P: its own login, settings and rules, kept in
-        ~/.vibe/profiles/P instead of ~/.claude"
-  ((IS_PI)) || a_flag="
+  local a_flag="
   -a    Auto permission mode instead of bypass"
-  ((IS_PI)) && home_desc="pi profile P: its own login, settings and rules, kept in
+  local home_desc="Claude profile P: its own login, settings and rules, kept in
+        ~/.vibe/profiles/P instead of ~/.claude"
+  ((IS_PI)) && a_flag="" home_desc="pi profile P: its own login, settings and rules, kept in
         ~/.vibe/pi-profiles/P instead of ~/.pi/agent"
+  ((IS_OC)) && a_flag="
+  -a    Ask as OpenCode's permission rules say instead of auto-approving" \
+    home_desc="OpenCode profile P: its own login, settings and rules, kept in
+        ~/.vibe/opencode-profiles/P instead of ~/.config/opencode and ~/.local/share/opencode"
   cat <<EOF
 Usage: $TOOL [flags] [directory] [-- args...]
 
@@ -174,7 +183,8 @@ write_project_profile() {
 
 # The default profile is the host's own agent home, so vibe keeps sharing its
 # login with a host-installed agent; named ones are self-contained under ~/.vibe.
-# pi keeps login, settings and state in its one agent dir.
+# pi keeps login, settings and state in its one agent dir. OpenCode splits them:
+# rules and plugins in its config dir, login and sessions in its data dir.
 set_profile_paths() {
   if ((IS_PI)); then
     if [[ -n "$PROFILE" ]]; then
@@ -183,6 +193,16 @@ set_profile_paths() {
       AGENT_HOME="${PI_CODING_AGENT_DIR:-${HOME}/.pi/agent}"
     fi
     AGENT_MOUNT=/home/dev/.pi/agent
+  elif ((IS_OC)); then
+    if [[ -n "$PROFILE" ]]; then
+      AGENT_HOME="${VIBE_HOME}/opencode-profiles/${PROFILE}/config"
+      OC_DATA="${VIBE_HOME}/opencode-profiles/${PROFILE}/data"
+    else
+      AGENT_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}/opencode"
+      OC_DATA="${XDG_DATA_HOME:-${HOME}/.local/share}/opencode"
+    fi
+    AGENT_MOUNT=/home/dev/.config/opencode
+    OC_DATA_MOUNT=/home/dev/.local/share/opencode
   elif [[ -n "$PROFILE" ]]; then
     AGENT_HOME="${VIBE_HOME}/profiles/${PROFILE}/claude"
     CLAUDE_JSON="${VIBE_HOME}/profiles/${PROFILE}/claude.json"
@@ -302,10 +322,10 @@ if [[ -n "${ON_BUILD:-}" && ! -f /tmp/.on_build_done ]]; then
 fi
 
 if [[ ! -f /tmp/.graphify_installed ]]; then
-  if [[ "${VIBE_AGENT:-claude}" == pi ]]; then
-    graphify install --platform pi &>/dev/null || true
-  else
+  if [[ "${VIBE_AGENT:-claude}" == claude ]]; then
     graphify install &>/dev/null || true
+  else
+    graphify install --platform "$VIBE_AGENT" &>/dev/null || true
   fi
   touch /tmp/.graphify_installed
 fi
@@ -422,10 +442,16 @@ RUN mkdir -p \
   /home/$USER/.local/bin \
   /home/$USER/.local/state/claude \
   /home/$USER/.claude \
-  /home/$USER/.pi/agent
+  /home/$USER/.pi/agent \
+  /home/$USER/.config/opencode \
+  /home/$USER/.local/share/opencode
 
+# The OpenCode installer only knows ~/.opencode/bin
 RUN if [ "$AGENT" = pi ]; then \
       npm install -g --prefix /home/$USER/.local --ignore-scripts @earendil-works/pi-coding-agent; \
+    elif [ "$AGENT" = opencode ]; then \
+      curl -fsSL https://opencode.ai/v2/install | bash -s -- --no-modify-path \
+      && ln -s /home/$USER/.opencode/bin/opencode /home/$USER/.local/bin/opencode; \
     else \
       curl -fsSL https://claude.ai/install.sh | bash; \
     fi \
@@ -481,6 +507,12 @@ if ((ISOLATED)); then
     exec docker run --rm "${EXTRA_ENVS[@]}" \
       -v "${AGENT_HOME}:${AGENT_MOUNT}" \
       "$IMAGE_NAME" pi -p --approve --no-session "$QUERY_PROMPT" < /dev/null
+  fi
+  if ((IS_OC)); then
+    mkdir -p "$OC_DATA"
+    exec docker run --rm "${EXTRA_ENVS[@]}" \
+      -v "${AGENT_HOME}:${AGENT_MOUNT}" -v "${OC_DATA}:${OC_DATA_MOUNT}" \
+      "$IMAGE_NAME" opencode run --standalone --auto --archived "$QUERY_PROMPT" < /dev/null
   fi
   [[ -f "$CLAUDE_JSON" ]] || echo '{}' > "$CLAUDE_JSON"
   exec docker run --rm "${EXTRA_ENVS[@]}" \
@@ -679,7 +711,7 @@ mkdir -p "$AGENT_HOME"
 inject_section() {
   local heading="$1" content="$2"
   local claude_md="$AGENT_HOME/CLAUDE.md"
-  ((IS_PI)) && claude_md="$AGENT_HOME/AGENTS.md"
+  ((IS_PI || IS_OC)) && claude_md="$AGENT_HOME/AGENTS.md"
   local block
   block="$(printf '%s\n\n%s' "$heading" "$content")"
 
@@ -739,7 +771,7 @@ inject_section "## Environment (maintained by the vibe utility)" "$ENV_CONTENT"
 # Drop what older versions wrote into the project; nothing refreshes it now that
 # rules, hooks and settings are global, so it would linger as stale duplicates.
 PROJECT_CLAUDE_MD="$VIBE_DIR/CLAUDE.md"
-if ! ((IS_PI)) && [[ -f "$PROJECT_CLAUDE_MD" ]] && grep -q '^## .* (maintained by the vibe utility)$' "$PROJECT_CLAUDE_MD"; then
+if [[ "$AGENT" == claude && -f "$PROJECT_CLAUDE_MD" ]] && grep -q '^## .* (maintained by the vibe utility)$' "$PROJECT_CLAUDE_MD"; then
   awk '
     /^## .* \(maintained by the vibe utility\)$/ { skip=1; next }
     skip && /^## / { skip=0 }
@@ -752,12 +784,13 @@ if ! ((IS_PI)) && [[ -f "$PROJECT_CLAUDE_MD" ]] && grep -q '^## .* (maintained b
     rm -f "$PROJECT_CLAUDE_MD.tmp" "$PROJECT_CLAUDE_MD"
   fi
 fi
-((IS_PI)) || rm -rf "$VIBE_DIR/vibe-hooks"
+[[ "$AGENT" != claude ]] || rm -rf "$VIBE_DIR/vibe-hooks"
 
 # Enforce the rules that prompts can't reliably enforce, via Claude Code hooks.
 # Scripts are (re)written each run; only their references are merged into
 # ~/.claude/settings.json so an existing user config is never clobbered.
-# pi has no hooks, so an extension feeds them Claude-shaped input instead.
+# pi and OpenCode have no hooks, so an extension or plugin feeds them
+# Claude-shaped input instead.
 HOOKS_DIR="$AGENT_HOME/vibe-hooks"
 mkdir -p "$HOOKS_DIR"
 
@@ -1012,6 +1045,66 @@ export default function (pi: any) {
   });
 }
 TS
+elif ((IS_OC)); then
+mkdir -p "$AGENT_HOME/plugins"
+cat > "$AGENT_HOME/plugins/vibe-guard.ts" <<'TS'
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const HOOKS = join(dirname(fileURLToPath(import.meta.url)), "..", "vibe-hooks");
+
+function runHook(name: string, payload: object) {
+  return spawnSync("python3", [join(HOOKS, name)], {
+    input: JSON.stringify(payload),
+    encoding: "utf8",
+  });
+}
+
+export default {
+  id: "vibe-guard",
+  async setup(ctx: any) {
+    // vibe passes the per-container system prompt in the environment
+    const system = process.env.VIBE_SYSTEM_PROMPT;
+    if (system) {
+      await ctx.session.hook("context", (event: any) => {
+        event.system.push({ type: "text", text: system });
+      });
+    }
+
+    await ctx.session.hook("prompt", (event: any) => {
+      runHook("prompt_gate.py", { prompt: event.prompt.text, session_id: event.sessionID });
+    });
+
+    // A thrown error rejects the call, and its message becomes the tool error.
+    await ctx.tool.hook("execute.before", (event: any) => {
+      if (event.tool !== "shell") return;
+      const r = runHook("commit_guard.py", {
+        tool_input: { command: event.input?.command },
+        session_id: event.sessionID,
+      });
+      if (r.status === 2) throw new Error(r.stderr);
+    });
+
+    // The edit already landed, so a block can only be reported to the model.
+    await ctx.tool.hook("execute.after", (event: any) => {
+      if (event.status !== "completed" || !["edit", "write"].includes(event.tool)) return;
+      const { path, content, oldString, newString } = event.input ?? {};
+      const r = runHook("comment_guard.py", {
+        tool_input: { file_path: path, content, old_string: oldString, new_string: newString },
+      });
+      let out: any;
+      try { out = JSON.parse(r.stdout); } catch { return; }
+      const note = out.reason ?? out.hookSpecificOutput?.additionalContext;
+      if (!note) return;
+      const prev = event.result.content;
+      const text = typeof prev === "string" ? prev : String(event.result.output ?? "");
+      const parts = Array.isArray(prev) && prev.length ? [...prev] : [{ type: "text", text }];
+      event.result.content = [...parts, { type: "text", text: note }];
+    });
+  },
+};
+TS
 else
 VIBE_DIR="$VIBE_DIR" AGENT_HOME="$AGENT_HOME" python3 - <<'PY'
 import json, os, sys
@@ -1106,6 +1199,7 @@ DIR_BASENAME="$(sanitize "$(basename "$TARGET_DIR")")"
 # Set terminal/tmux window name early (before slow docker run)
 TITLE_PREFIX=""
 ((IS_PI)) && TITLE_PREFIX=p
+((IS_OC)) && TITLE_PREFIX=o
 if [[ -n "$WORKTREE_BRANCH" ]]; then
   WINDOW_TITLE="${TITLE_PREFIX}w:${DIR_BASENAME}:${WORKTREE_BRANCH}${PROFILE:+@$PROFILE}"
 else
@@ -1365,6 +1459,27 @@ if ((IS_PI)); then
   # pi keys sessions by cwd under sessions/, so a project-local store keeps them with the project
   AGENT_SESSIONS="${VIBE_DIR}/.sessions"
   mkdir -p "$AGENT_HOME" "$AGENT_SESSIONS" "$AGENT_HOME/sessions"
+elif ((IS_OC)); then
+  # One sqlite db holds every project's sessions, so they stay in the data dir
+  mkdir -p "$AGENT_HOME" "$OC_DATA"
+  # A self-update would replace the binary the image installed
+  python3 - "$AGENT_HOME/opencode.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        data = json.load(f)
+except FileNotFoundError:
+    data = {}
+except ValueError:
+    sys.exit(0)
+if isinstance(data, dict) and data.get("update") != "disable":
+    data["update"] = "disable"
+    with open(path + ".tmp", "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(path + ".tmp", path)
+PY
 else
 CLAUDE_PROJECTS="${VIBE_DIR}/.projects"
 mkdir -p "$AGENT_HOME" "$CLAUDE_STATE" "$CLAUDE_PROJECTS"
@@ -1442,6 +1557,11 @@ if ((IS_PI)); then
   VOLUMES+=(
     -v "${AGENT_HOME}:${AGENT_MOUNT}"
     -v "${AGENT_SESSIONS}:${AGENT_MOUNT}/sessions"
+  )
+elif ((IS_OC)); then
+  VOLUMES+=(
+    -v "${AGENT_HOME}:${AGENT_MOUNT}"
+    -v "${OC_DATA}:${OC_DATA_MOUNT}"
   )
 else
   VOLUMES+=(
@@ -1827,6 +1947,8 @@ fi
 if ((QUERY)); then
   if ((IS_PI)); then
     "${EXEC[@]}" /entrypoint.sh pi -p --approve "$QUERY_PROMPT" < /dev/null
+  elif ((IS_OC)); then
+    "${EXEC[@]}" /entrypoint.sh opencode run --standalone --auto "$QUERY_PROMPT" < /dev/null
   else
     "${EXEC[@]}" /entrypoint.sh claude -p "$QUERY_PROMPT" --dangerously-skip-permissions < /dev/null
   fi
@@ -1886,20 +2008,34 @@ if [[ ${#MOUNT_DIRS[@]} -gt 0 ]]; then
   SYSTEM_PROMPT+="Host directories mounted at: ${_list%, }."$'\n'
 fi
 
-# --approve trusts the project's .pi/ for this run only, as Claude's accepted trust dialog does
-TOOL_FLAGS=(--approve)
-((IS_PI)) || TOOL_FLAGS=(--permission-mode "$PERMISSION_MODE" --allow-dangerously-skip-permissions)
-if [[ -n "$SYSTEM_PROMPT" ]]; then
+if ((IS_PI)); then
+  # --approve trusts the project's .pi/ for this run only, as Claude's accepted trust dialog does
+  TOOL_FLAGS=(--approve)
+elif ((IS_OC)); then
+  # --standalone: a private server per run, so the env below reaches the plugin
+  TOOL_FLAGS=(--standalone)
+  [[ "$PERMISSION_MODE" == bypassPermissions ]] && TOOL_FLAGS+=(--auto)
+else
+  TOOL_FLAGS=(--permission-mode "$PERMISSION_MODE" --allow-dangerously-skip-permissions)
+fi
+if [[ -n "$SYSTEM_PROMPT" ]] && ! ((IS_OC)); then
   TOOL_FLAGS+=(--append-system-prompt "$SYSTEM_PROMPT")
 fi
 
 
-# pi -c starts a fresh session when there is none to continue
+# pi -c and opencode -c start a fresh session when there is none to continue
 if ((IS_PI)); then
   if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
     "${EXEC[@]}" /entrypoint.sh pi "${TOOL_FLAGS[@]}" "${EXTRA_ARGS[@]}"
   else
     "${EXEC[@]}" /entrypoint.sh pi -c "${TOOL_FLAGS[@]}"
+  fi
+elif ((IS_OC)); then
+  OC_CMD=(env "VIBE_SYSTEM_PROMPT=$SYSTEM_PROMPT" /entrypoint.sh opencode "${TOOL_FLAGS[@]}")
+  if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+    "${EXEC[@]}" "${OC_CMD[@]}" "${EXTRA_ARGS[@]}"
+  else
+    "${EXEC[@]}" "${OC_CMD[@]}" -c
   fi
 elif [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
   "${EXEC[@]}" /entrypoint.sh claude "${TOOL_FLAGS[@]}" "${EXTRA_ARGS[@]}"
